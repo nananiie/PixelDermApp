@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx react-native *)",
+      "Bash(./gradlew.bat app:installDebug -PreactNativeDevServerPort=8081)"
+    ]
+  }
+}
