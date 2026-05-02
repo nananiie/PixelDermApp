@@ -15,7 +15,7 @@ import {
   Modal,
   FlatList,
 } from 'react-native';
-import { Camera, useCameraDevice, useCameraPermission } from 'react-native-vision-camera';
+import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
 import * as ImagePicker from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getOrCreateUserId, analyzeImage, type AnalyzeResult } from './src/api';
@@ -154,10 +154,11 @@ const PixelDermApp = () => {
   // --- CAMERA HOOKS ---
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice(cameraPosition);
+  const photoOutput = usePhotoOutput();
 
   useEffect(() => {
     if (currentScreen === 'upload' && uploadMode === 'camera' && !hasPermission) {
-      requestPermission();
+      requestPermission().catch(console.error);
     }
   }, [currentScreen, uploadMode, hasPermission]);
 
@@ -198,7 +199,7 @@ const PixelDermApp = () => {
         console.error('Failed to restore session:', e);
       }
     };
-    restore();
+    restore().catch(console.error);
   }, []);
 
   // Persist state whenever it changes
@@ -217,35 +218,58 @@ const PixelDermApp = () => {
 
   // --- ACTION HANDLERS ---
   const handleCapture = async () => {
-    // Reset and start progress animation
+    // Resolve the image URI — camera mode takes a photo, gallery mode uses the picked image
+    let imageUri: string | undefined;
+
+    if (uploadMode === 'camera') {
+      try {
+        const photo = await photoOutput.capturePhoto({}, {});
+        const rawPath = await photo.saveToTemporaryFileAsync();
+        imageUri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
+        photo.dispose();
+      } catch (e: any) {
+        Alert.alert('Camera Error', e.message ?? 'Failed to take photo');
+        return;
+      }
+    } else {
+      imageUri = (selectedImage as any)?.uri;
+    }
+
+    if (!imageUri) {
+      Alert.alert('No Image', 'Please select or capture an image first.');
+      return;
+    }
+
+    // Start progress animation
     progressRef.current = 0;
     setProgress(0);
     setCurrentScreen('processing');
 
-    // Ease toward 90% while waiting for the API — slows as it approaches the cap
     const timer = setInterval(() => {
       const next = progressRef.current + (90 - progressRef.current) * 0.08;
       progressRef.current = next;
       setProgress(Math.round(next));
     }, 120);
 
+    let hasError = false;
     try {
       const uid = userId ?? (await getOrCreateUserId());
       if (!userId) setUserId(uid);
 
-      const imageUri = (selectedImage as any)?.uri;
-      if (imageUri) {
-        const result = await analyzeImage(imageUri, uid, activePart);
-        setAnalysisResult(result);
-      }
+      const result = await analyzeImage(imageUri, uid, activePart);
+      setAnalysisResult(result);
     } catch (e: any) {
+      hasError = true;
       Alert.alert('Analysis Error', e.message);
     } finally {
       clearInterval(timer);
-      progressRef.current = 100;
-      setProgress(100);
-      // Brief pause at 100% before navigating
-      setTimeout(() => setCurrentScreen('analysis'), 400);
+      if (hasError) {
+        setCurrentScreen('upload');
+      } else {
+        progressRef.current = 100;
+        setProgress(100);
+        setTimeout(() => setCurrentScreen('analysis'), 400);
+      }
     }
   };
 
@@ -552,11 +576,11 @@ const PixelDermApp = () => {
                         style={StyleSheet.absoluteFill}
                         device={device}
                         isActive={currentScreen === 'upload' && uploadMode === 'camera'}
-                        photo={true}
-                        torch={torchOn ? 'on' : 'off'}
+                        outputs={[photoOutput]}
+                        torchMode={device?.hasTorch ? (torchOn ? 'on' : 'off') : undefined}
                       />
                       <View style={styles.cameraControls}>
-                        {cameraPosition === 'back' && (
+                        {cameraPosition === 'back' && device?.hasTorch && (
                           <TouchableOpacity
                             style={[styles.cameraControlBtn, torchOn && styles.cameraControlBtnActive]}
                             onPress={() => setTorchOn(v => !v)}
@@ -646,49 +670,45 @@ const PixelDermApp = () => {
   );
 
   const renderAnalysis = () => {
+    if (!analysisResult) return null;
+
+    const { features, baseline, recommendation, analysis } = analysisResult;
+
     const riskMap: Record<string, { label: string; color: string }> = {
-      normal:   { label: 'Low',      color: COLORS.riskLow },
-      moderate: { label: 'Moderate', color: COLORS.riskModerate },
+      'Stable':             { label: 'Stable',    color: COLORS.riskLow },
+      'Regression Detected':{ label: 'Regression',color: COLORS.riskModerate },
+      'Alert':              { label: 'Alert',     color: COLORS.riskHigh },
     };
-    const riskInfo = analysisResult
-      ? (riskMap[analysisResult.recommendation.status] ?? { label: 'High', color: COLORS.riskHigh })
-      : { label: 'High', color: COLORS.riskHigh };
+    const riskInfo = riskMap[recommendation.status] ?? { label: recommendation.status, color: COLORS.riskHigh };
 
-    const uvScore = analysisResult
-      ? Math.min(100, Math.round(analysisResult.features.textureScore * 100))
-      : 84;
+    const pigmentPct  = (features.pigmentation * 100).toFixed(1);
+    const textureFmt  = features.textureScore.toFixed(3);
+    const scanDate    = new Date(analysis.timestamp).toLocaleString();
 
-    const detectedRows = analysisResult
-      ? [
-          [`${analysisResult.features.spotCount} spot(s) detected`, riskInfo.label],
-          [`Texture score: ${analysisResult.features.textureScore}`, riskInfo.label],
-          [`Pigmentation: ${analysisResult.features.pigmentation}`, riskInfo.label],
-        ]
-      : [['Rough skin texture', 'High'], ['Hyperpigmentation', 'High'], ['Wrinkles', 'High']];
+    // Baseline delta helpers
+    const spotDelta       = baseline ? features.spotCount - baseline.spotCount : null;
+    const textureDelta    = baseline ? (features.textureScore - baseline.textureScore).toFixed(3) : null;
+    const pigmentDelta    = baseline ? ((features.pigmentation - baseline.pigmentation) * 100).toFixed(1) : null;
 
-    const adviceLines = analysisResult
-      ? analysisResult.recommendation.advice.split(/\.\s+/).filter(Boolean)
-      : [
-          'Apply broad-spectrum SPF 30+ sunscreen daily, even on cloudy days',
-          'Reapply sunscreen every 2 hours when outdoors',
-          'Wear protective clothing and a wide-brimmed hat when in direct sunlight',
-        ];
+    const fmt = (n: number | null, unit = '') =>
+      n === null ? '—' : `${n > 0 ? '+' : ''}${n}${unit}`;
 
     return (
     <View style={styles.fullScreen}>
       <View style={styles.innerCanvas}>
         <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
           <Text style={styles.dashboardTitle}>Analysis Complete</Text>
-          <Text style={styles.subtext}>Risk level, UV damage score, and results</Text>
+          <Text style={styles.subtext}>{scanDate}</Text>
 
-          <View style={[styles.outlinedCard, { flexDirection: 'row', justifyContent: 'space-between' }]}>
+          {/* Status strip */}
+          <View style={[styles.outlinedCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
             <View>
-              <Text style={styles.cardLabel}>Risk Level</Text>
+              <Text style={styles.cardLabel}>Status</Text>
               <Text style={[styles.cardValue, { color: riskInfo.color }]}>{riskInfo.label}</Text>
             </View>
             <View style={{ alignItems: 'flex-end' }}>
-              <Text style={styles.cardLabel}>UV Damage Score</Text>
-              <Text style={styles.cardValue}>{uvScore}/100</Text>
+              <Text style={styles.cardLabel}>Area</Text>
+              <Text style={styles.cardValue}>{activePart}</Text>
             </View>
           </View>
 
@@ -700,7 +720,7 @@ const PixelDermApp = () => {
                 onPress={() => setAnalysisTab(tab)}
               >
                 <Text style={[styles.customTabText, analysisTab === tab && styles.customTabTextActive]}>
-                  {tab === 'results' ? 'Analyzed Results' : 'Comparison'}
+                  {tab === 'results' ? 'Results' : 'vs Baseline'}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -709,46 +729,84 @@ const PixelDermApp = () => {
           {analysisTab === 'results' ? (
             <>
               <View style={styles.outlinedCard}>
-                <Text style={styles.cardTitle}>Detected Spots and Patterns</Text>
-                {detectedRows.map(([label, risk]) => (
-                  <View key={label} style={styles.resultRow}>
-                    <Text style={styles.resultText}>{label}</Text>
-                    <Text style={{ color: riskInfo.color }}>{risk}</Text>
-                  </View>
-                ))}
+                <Text style={styles.cardTitle}>Detected Metrics</Text>
+                <View style={styles.resultRow}>
+                  <Text style={styles.resultText}>Spots detected</Text>
+                  <Text style={[styles.resultText, { fontWeight: 'bold', color: riskInfo.color }]}>{features.spotCount}</Text>
+                </View>
+                <View style={styles.resultRow}>
+                  <Text style={styles.resultText}>Texture score</Text>
+                  <Text style={[styles.resultText, { fontWeight: 'bold' }]}>{textureFmt}</Text>
+                </View>
+                <View style={[styles.resultRow, { borderBottomWidth: 0 }]}>
+                  <Text style={styles.resultText}>Pigmentation</Text>
+                  <Text style={[styles.resultText, { fontWeight: 'bold' }]}>{pigmentPct}%</Text>
+                </View>
               </View>
+
               <View style={[styles.outlinedCard, { backgroundColor: COLORS.secondary + '40' }]}>
-                <Text style={styles.cardTitle}>Recommendations</Text>
-                {adviceLines.map((line, i) => (
-                  <View key={i} style={styles.recommendationBubble}>
-                    <Text style={styles.textSmall}>{line}</Text>
-                  </View>
-                ))}
-                {riskInfo.label === 'High' && (
+                <Text style={styles.cardTitle}>Recommendation</Text>
+                <View style={styles.recommendationBubble}>
+                  <Text style={styles.textSmall}>{recommendation.advice}</Text>
+                </View>
+                {riskInfo.label === 'Alert' && (
                   <View style={styles.warningBox}>
-                    <Text style={styles.warningText}>Based on the analysis, we recommend consulting a dermatologist for professional evaluation.</Text>
+                    <Text style={styles.warningText}>High spot density detected. Please consult a dermatologist for a professional evaluation.</Text>
                   </View>
                 )}
               </View>
             </>
           ) : (
             <>
-              <View style={styles.outlinedCard}>
-                <Text style={styles.cardTitle}>Last Scan vs New Scan</Text>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 }}>
-                  <View style={styles.mockImageSquare}><Text style={styles.centerSubtext}>Image of{'\n'}last scan</Text></View>
-                  <View style={styles.mockImageSquare}><Text style={styles.centerSubtext}>Image of{'\n'}new scan</Text></View>
+              {baseline ? (
+                <>
+                  <View style={styles.outlinedCard}>
+                    <Text style={styles.cardTitle}>Current vs Baseline</Text>
+                    <View style={styles.resultRow}>
+                      <Text style={styles.resultText}>Spots</Text>
+                      <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={styles.resultText}>{features.spotCount} <Text style={styles.subtext}>(baseline {baseline.spotCount})</Text></Text>
+                        <Text style={{ color: spotDelta! > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>
+                          {fmt(spotDelta)}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.resultRow}>
+                      <Text style={styles.resultText}>Texture</Text>
+                      <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={styles.resultText}>{textureFmt} <Text style={styles.subtext}>(baseline {baseline.textureScore.toFixed(3)})</Text></Text>
+                        <Text style={{ color: Number(textureDelta) > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>
+                          {textureDelta !== null ? `${Number(textureDelta) > 0 ? '+' : ''}${textureDelta}` : '—'}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={[styles.resultRow, { borderBottomWidth: 0 }]}>
+                      <Text style={styles.resultText}>Pigmentation</Text>
+                      <View style={{ alignItems: 'flex-end' }}>
+                        <Text style={styles.resultText}>{pigmentPct}% <Text style={styles.subtext}>(baseline {(baseline.pigmentation * 100).toFixed(1)}%)</Text></Text>
+                        <Text style={{ color: Number(pigmentDelta) > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>
+                          {pigmentDelta !== null ? `${Number(pigmentDelta) > 0 ? '+' : ''}${pigmentDelta}%` : '—'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                  <View style={styles.outlinedCard}>
+                    <Text style={styles.cardTitle}>Overall Change</Text>
+                    <View style={styles.recommendationBubble}>
+                      <Text style={styles.textSmall}>{recommendation.status === 'Stable'
+                        ? 'Your skin metrics are stable compared to your baseline. Keep up your current routine.'
+                        : recommendation.advice}
+                      </Text>
+                    </View>
+                  </View>
+                </>
+              ) : (
+                <View style={styles.outlinedCard}>
+                  <Text style={[styles.textSmall, { color: COLORS.subtext, textAlign: 'center', paddingVertical: 20 }]}>
+                    This is your first scan for {activePart}.{'\n'}A baseline has been set — future scans will be compared against it.
+                  </Text>
                 </View>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 5, paddingHorizontal: 20 }}>
-                  <Text style={styles.centerSubtext}>1/17/25</Text>
-                  <Text style={styles.centerSubtext}>1/24/25</Text>
-                </View>
-              </View>
-              <View style={styles.outlinedCard}>
-                <Text style={styles.cardTitle}>Changes</Text>
-                <View style={styles.recommendationBubble}><Text style={styles.textSmall}>Dark spots increased</Text></View>
-                <View style={styles.recommendationBubble}><Text style={styles.textSmall}>Higher roughness in skin texture</Text></View>
-              </View>
+              )}
             </>
           )}
           <View style={{ height: 40 }} />

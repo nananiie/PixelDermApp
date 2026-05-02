@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://172.20.10.6:3000';
+const BASE_URL = 'http://192.168.0.107:3000';
 
 const USER_ID_KEY = '@pixelderm_user_id';
 

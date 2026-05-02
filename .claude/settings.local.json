@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(npx react-native *)",
-      "Bash(./gradlew.bat app:installDebug -PreactNativeDevServerPort=8081)"
+      "Bash(./gradlew.bat app:installDebug -PreactNativeDevServerPort=8081)",
+      "Bash(dir \"c:\\\\Users\\\\patio\\\\Documents\\\\longitudinal_skin_analysis\")"
     ]
   }
 }
