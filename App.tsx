@@ -9,7 +9,6 @@ import {
   ScrollView,
   StatusBar,
   ActivityIndicator,
-  Switch,
   Image,
   Alert,
   Modal,
@@ -18,17 +17,28 @@ import {
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
 import * as ImagePicker from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getOrCreateUserId, analyzeImage, type AnalyzeResult } from './src/api';
+import { createNewUser, analyzeImage, type AnalyzeResult } from './src/api';
 
-const STORAGE_KEYS = {
-  analysisResult: '@pixelderm_last_analysis',
-  monitoredParts: '@pixelderm_monitored_parts',
-  activePart:     '@pixelderm_active_part',
-  profile:        '@pixelderm_profile',
-  onboarded:      '@pixelderm_onboarded',
+// --- TYPES ---
+type Profile = {
+  id: string;
+  name: string;
+  age: string;
+  sex: string;
+  skinType: string;
+  userId: string | null;
+  monitoredParts: string[];
+  activePart: string;
+  lastAnalysis: AnalyzeResult | null;
+  scanHistory: Record<string, AnalyzeResult[]>;
 };
 
-// --- THEME COLORS ---
+const STORAGE_KEYS = {
+  profiles: '@pixelderm_profiles',
+  activeProfileId: '@pixelderm_active_profile_id',
+};
+
+// --- THEME ---
 const COLORS = {
   primary: '#91AFC2',
   secondary: '#D1E0E8',
@@ -44,46 +54,26 @@ const COLORS = {
   riskHigh: '#F44336',
 };
 
-// --- DROPDOWN COMPONENT ---
+// --- DROPDOWN ---
 const DropdownField = ({ placeholder, value, options, onSelect }) => {
   const [visible, setVisible] = useState(false);
-
   return (
     <>
-      <TouchableOpacity
-        style={styles.inputField}
-        onPress={() => setVisible(true)}
-        activeOpacity={0.8}
-      >
-        <Text style={{ color: value ? COLORS.text : '#AAAAAA', fontSize: 15 }}>
-          {value || placeholder}
-        </Text>
+      <TouchableOpacity style={styles.inputField} onPress={() => setVisible(true)} activeOpacity={0.8}>
+        <Text style={{ color: value ? COLORS.text : '#AAAAAA', fontSize: 15 }}>{value || placeholder}</Text>
         <Text style={{ color: COLORS.subtext, fontSize: 12 }}>▼</Text>
       </TouchableOpacity>
-
       <Modal visible={visible} transparent animationType="fade">
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setVisible(false)}
-        >
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setVisible(false)}>
           <View style={styles.dropdownSheet}>
             <Text style={styles.dropdownTitle}>{placeholder}</Text>
             {options.map((opt) => (
               <TouchableOpacity
                 key={opt}
-                style={[
-                  styles.dropdownItem,
-                  value === opt && { backgroundColor: COLORS.secondary },
-                ]}
-                onPress={() => {
-                  onSelect(opt);
-                  setVisible(false);
-                }}
+                style={[styles.dropdownItem, value === opt && { backgroundColor: COLORS.secondary }]}
+                onPress={() => { onSelect(opt); setVisible(false); }}
               >
-                <Text style={[styles.dropdownItemText, value === opt && { color: COLORS.accent, fontWeight: '600' }]}>
-                  {opt}
-                </Text>
+                <Text style={[styles.dropdownItemText, value === opt && { color: COLORS.accent, fontWeight: '600' }]}>{opt}</Text>
                 {value === opt && <Text style={{ color: COLORS.accent }}>✓</Text>}
               </TouchableOpacity>
             ))}
@@ -94,7 +84,7 @@ const DropdownField = ({ placeholder, value, options, onSelect }) => {
   );
 };
 
-// --- BODY PART SELECTOR COMPONENT ---
+// --- BODY PART TAB ---
 const BodyPartTab = ({ parts, activePart, onSelect, onAdd }) => (
   <ScrollView
     horizontal
@@ -108,9 +98,7 @@ const BodyPartTab = ({ parts, activePart, onSelect, onAdd }) => (
         style={[styles.bodyPartChip, activePart === part && styles.bodyPartChipActive]}
         onPress={() => onSelect(part)}
       >
-        <Text style={[styles.bodyPartChipText, activePart === part && styles.bodyPartChipTextActive]}>
-          {part}
-        </Text>
+        <Text style={[styles.bodyPartChipText, activePart === part && styles.bodyPartChipTextActive]}>{part}</Text>
       </TouchableOpacity>
     ))}
     <TouchableOpacity style={styles.addBodyPartChip} onPress={onAdd}>
@@ -119,43 +107,64 @@ const BodyPartTab = ({ parts, activePart, onSelect, onAdd }) => (
   </ScrollView>
 );
 
-// --- BODY PART OPTIONS MODAL ---
 const AVAILABLE_BODY_PARTS = [
   'Face', 'Neck', 'Left Arm', 'Right Arm', 'Left Hand', 'Right Hand',
   'Chest', 'Back', 'Abdomen', 'Left Leg', 'Right Leg', 'Left Foot', 'Right Foot',
 ];
 
+const computeSkinScore = (features: { spotCount: number; textureScore: number; pigmentation: number }) =>
+  Math.min(100, Math.round(
+    (
+      (100 - Math.min(features.textureScore * 100, 100))
+      + (100 - Math.min(features.pigmentation * 100, 100))
+      + (100 - Math.min(features.spotCount * 2, 100))
+    ) / 3
+  ));
+
+const skinScoreRisk = (score: number) =>
+  score >= 70
+    ? { label: 'Low', color: COLORS.riskLow }
+    : score >= 40
+    ? { label: 'Moderate', color: COLORS.riskModerate }
+    : { label: 'High', color: COLORS.riskHigh };
+
 const PixelDermApp = () => {
-  // --- APP STATE ---
+  // --- STATE ---
   const [currentScreen, setCurrentScreen] = useState('landing');
   const [analysisTab, setAnalysisTab] = useState('results');
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  // Upload flow
   const [selectedImage, setSelectedImage] = useState(null);
-  const [userId, setUserId] = useState<string | null>(null);
-  const [analysisResult, setAnalysisResult] = useState<AnalyzeResult | null>(null);
   const [progress, setProgress] = useState(0);
   const progressRef = useRef(0);
+  const [uploadMode, setUploadMode] = useState(null);
+  const [cameraPosition, setCameraPosition] = useState<'back' | 'front'>('back');
 
-  // Input screen state
-  const [age, setAge] = useState('');
-  const [sex, setSex] = useState('');
-  const [skinType, setSkinType] = useState('');
-
-  // Body parts state
-  const [monitoredParts, setMonitoredParts] = useState(['Face']);
-  const [activePart, setActivePart] = useState('Face');
+  // Profiles
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
   const [showAddPartModal, setShowAddPartModal] = useState(false);
 
-  // Upload screen: camera vs gallery mode
-  const [uploadMode, setUploadMode] = useState(null); // null | 'camera' | 'gallery'
-  const [cameraPosition, setCameraPosition] = useState<'back' | 'front'>('back');
-  const [torchOn, setTorchOn] = useState(false);
+  // Profile form
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
+  const [formName, setFormName] = useState('');
+  const [formAge, setFormAge] = useState('');
+  const [formSex, setFormSex] = useState('');
+  const [formSkinType, setFormSkinType] = useState('');
 
-  // --- CAMERA HOOKS ---
+  // Camera
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice(cameraPosition);
   const photoOutput = usePhotoOutput();
 
+  // --- DERIVED ---
+  const activeProfile = profiles.find(p => p.id === activeProfileId) ?? null;
+
+  const updateActiveProfile = (updates: Partial<Profile>) => {
+    setProfiles(prev => prev.map(p => p.id === activeProfileId ? { ...p, ...updates } : p));
+  };
+
+  // --- EFFECTS ---
   useEffect(() => {
     if (currentScreen === 'upload' && uploadMode === 'camera' && !hasPermission) {
       requestPermission().catch(console.error);
@@ -167,34 +176,27 @@ const PixelDermApp = () => {
       setSelectedImage(null);
       setUploadMode(null);
       setCameraPosition('back');
-      setTorchOn(false);
     }
   }, [currentScreen]);
 
-  // Restore persisted state on mount
   useEffect(() => {
     const restore = async () => {
       try {
-        await getOrCreateUserId().then(setUserId);
-
-        const [savedAnalysis, savedParts, savedActive, savedProfile, savedOnboarded] = await Promise.all([
-          AsyncStorage.getItem(STORAGE_KEYS.analysisResult),
-          AsyncStorage.getItem(STORAGE_KEYS.monitoredParts),
-          AsyncStorage.getItem(STORAGE_KEYS.activePart),
-          AsyncStorage.getItem(STORAGE_KEYS.profile),
-          AsyncStorage.getItem(STORAGE_KEYS.onboarded),
+        const [profilesStr, activeIdStr] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_KEYS.profiles),
+          AsyncStorage.getItem(STORAGE_KEYS.activeProfileId),
         ]);
-
-        if (savedAnalysis) setAnalysisResult(JSON.parse(savedAnalysis));
-        if (savedParts)    setMonitoredParts(JSON.parse(savedParts));
-        if (savedActive)   setActivePart(savedActive);
-        if (savedProfile) {
-          const p = JSON.parse(savedProfile);
-          if (p.age)      setAge(p.age);
-          if (p.sex)      setSex(p.sex);
-          if (p.skinType) setSkinType(p.skinType);
+        if (profilesStr) {
+          const saved = JSON.parse(profilesStr) as Profile[];
+          setProfiles(saved);
+          if (activeIdStr && saved.find(p => p.id === activeIdStr)) {
+            setActiveProfileId(activeIdStr);
+            setCurrentScreen('home');
+          } else if (saved.length > 0) {
+            setActiveProfileId(saved[0].id);
+            setCurrentScreen('home');
+          }
         }
-        if (savedOnboarded === 'true') setCurrentScreen('home');
       } catch (e) {
         console.error('Failed to restore session:', e);
       }
@@ -202,28 +204,23 @@ const PixelDermApp = () => {
     restore().catch(console.error);
   }, []);
 
-  // Persist state whenever it changes
   useEffect(() => {
-    if (analysisResult)
-      AsyncStorage.setItem(STORAGE_KEYS.analysisResult, JSON.stringify(analysisResult)).catch(() => {});
-  }, [analysisResult]);
+    AsyncStorage.setItem(STORAGE_KEYS.profiles, JSON.stringify(profiles)).catch(() => {});
+  }, [profiles]);
 
   useEffect(() => {
-    AsyncStorage.setItem(STORAGE_KEYS.monitoredParts, JSON.stringify(monitoredParts)).catch(() => {});
-  }, [monitoredParts]);
+    if (activeProfileId) {
+      AsyncStorage.setItem(STORAGE_KEYS.activeProfileId, activeProfileId).catch(() => {});
+    }
+  }, [activeProfileId]);
 
-  useEffect(() => {
-    AsyncStorage.setItem(STORAGE_KEYS.activePart, activePart).catch(() => {});
-  }, [activePart]);
-
-  // --- ACTION HANDLERS ---
+  // --- HANDLERS ---
   const handleCapture = async () => {
-    // Resolve the image URI — camera mode takes a photo, gallery mode uses the picked image
     let imageUri: string | undefined;
 
     if (uploadMode === 'camera') {
       try {
-        const photo = await photoOutput.capturePhoto({}, {});
+        const photo = await photoOutput.capturePhoto({ enableShutterSound: false }, {});
         const rawPath = await photo.saveToTemporaryFileAsync();
         imageUri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
         photo.dispose();
@@ -240,7 +237,18 @@ const PixelDermApp = () => {
       return;
     }
 
-    // Start progress animation
+    const confirmed = await new Promise<boolean>(resolve =>
+      Alert.alert(
+        'Before You Scan',
+        'Consistency in uploading images is encouraged to ensure accurate results.\n\nTry to scan the same area under similar lighting and distance each time.',
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Continue', onPress: () => resolve(true) },
+        ]
+      )
+    );
+    if (!confirmed) return;
+
     progressRef.current = 0;
     setProgress(0);
     setCurrentScreen('processing');
@@ -253,11 +261,18 @@ const PixelDermApp = () => {
 
     let hasError = false;
     try {
-      const uid = userId ?? (await getOrCreateUserId());
-      if (!userId) setUserId(uid);
-
-      const result = await analyzeImage(imageUri, uid, activePart);
-      setAnalysisResult(result);
+      let uid = activeProfile?.userId ?? null;
+      if (!uid) {
+        uid = await createNewUser();
+        updateActiveProfile({ userId: uid });
+      }
+      const result = await analyzeImage(imageUri, uid, activeProfile?.activePart ?? 'Face');
+      const part = activeProfile?.activePart ?? 'Face';
+      const prevHistory = activeProfile?.scanHistory ?? {};
+      updateActiveProfile({
+        lastAnalysis: result,
+        scanHistory: { ...prevHistory, [part]: [result, ...(prevHistory[part] ?? [])] },
+      });
     } catch (e: any) {
       hasError = true;
       Alert.alert('Analysis Error', e.message);
@@ -274,40 +289,92 @@ const PixelDermApp = () => {
   };
 
   const handlePickFromGallery = () => {
-    const options = { mediaType: 'photo', maxWidth: 1000, maxHeight: 1000, quality: 0.8 };
-    ImagePicker.launchImageLibrary(options, (response) => {
+    ImagePicker.launchImageLibrary({ mediaType: 'photo', maxWidth: 1000, maxHeight: 1000, quality: 0.8 }, (response) => {
       if (response.didCancel) return;
-      if (response.errorCode) {
-        Alert.alert('Error', 'Failed to pick image: ' + response.errorMessage);
-        return;
-      }
+      if (response.errorCode) { Alert.alert('Error', 'Failed to pick image: ' + response.errorMessage); return; }
       if (response.assets?.length > 0) {
         const asset = response.assets[0];
-        const fileSizeInMB = (asset.fileSize || 0) / (1024 * 1024);
-        if (fileSizeInMB > 5) {
-          Alert.alert('Error', 'Image size exceeds 5MB limit');
-          return;
-        }
+        if ((asset.fileSize || 0) / (1024 * 1024) > 5) { Alert.alert('Error', 'Image size exceeds 5MB limit'); return; }
         setSelectedImage({ uri: asset.uri, fileName: asset.fileName });
         setUploadMode('gallery');
       }
     });
   };
 
-  const handleSwitchToCamera = () => {
-    setSelectedImage(null);
-    setUploadMode('camera');
-  };
-
-  const handleAddBodyPart = (part) => {
-    if (!monitoredParts.includes(part)) {
-      setMonitoredParts([...monitoredParts, part]);
+  const handleAddBodyPart = (part: string) => {
+    const current = activeProfile?.monitoredParts ?? ['Face'];
+    if (!current.includes(part)) {
+      updateActiveProfile({ monitoredParts: [...current, part], activePart: part });
+    } else {
+      updateActiveProfile({ activePart: part });
     }
-    setActivePart(part);
     setShowAddPartModal(false);
   };
 
-  // --- REUSABLE COMPONENTS ---
+  const handleAddProfile = () => {
+    setEditingProfile(null);
+    setFormName(''); setFormAge(''); setFormSex(''); setFormSkinType('');
+    setShowProfileModal(true);
+  };
+
+  const handleEditProfile = (profile: Profile) => {
+    setEditingProfile(profile);
+    setFormName(profile.name); setFormAge(profile.age);
+    setFormSex(profile.sex); setFormSkinType(profile.skinType);
+    setShowProfileModal(true);
+  };
+
+  const handleDeleteProfile = (profileId: string) => {
+    Alert.alert('Delete Profile', 'This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete', style: 'destructive',
+        onPress: () => {
+          setProfiles(prev => {
+            const updated = prev.filter(p => p.id !== profileId);
+            if (activeProfileId === profileId) {
+              if (updated.length > 0) { setActiveProfileId(updated[0].id); }
+              else { setActiveProfileId(null); setCurrentScreen('landing'); }
+            }
+            return updated;
+          });
+        },
+      },
+    ]);
+  };
+
+  const handleProfileMenu = (profile: Profile) => {
+    const isActive = profile.id === activeProfileId;
+    Alert.alert(profile.name, undefined, [
+      ...(!isActive ? [{ text: 'Switch to this profile', onPress: () => { setActiveProfileId(profile.id); setCurrentScreen('home'); } }] : []),
+      { text: 'Edit', onPress: () => handleEditProfile(profile) },
+      { text: 'Delete', style: 'destructive' as const, onPress: () => handleDeleteProfile(profile.id) },
+      { text: 'Cancel', style: 'cancel' as const },
+    ]);
+  };
+
+  const handleSaveProfile = () => {
+    if (!formName.trim()) { Alert.alert('Error', 'Please enter a name.'); return; }
+    if (editingProfile) {
+      setProfiles(prev => prev.map(p =>
+        p.id === editingProfile.id
+          ? { ...p, name: formName.trim(), age: formAge, sex: formSex, skinType: formSkinType }
+          : p
+      ));
+    } else {
+      const isFirst = profiles.length === 0;
+      const newProfile: Profile = {
+        id: `profile-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        name: formName.trim(), age: formAge, sex: formSex, skinType: formSkinType,
+        userId: null, monitoredParts: ['Face'], activePart: 'Face', lastAnalysis: null, scanHistory: {},
+      };
+      setProfiles(prev => [...prev, newProfile]);
+      if (isFirst) { setActiveProfileId(newProfile.id); setCurrentScreen('home'); }
+    }
+    setShowProfileModal(false);
+  };
+
+  // --- TAB BAR ---
   const TabBar = () => (
     <View style={styles.tabBar}>
       {[
@@ -316,13 +383,9 @@ const PixelDermApp = () => {
         { screen: 'profile', label: 'Profile', iconDefault: require('./assets/icons/user_logo.png'), iconActive: require('./assets/icons/userShaded_logo.png') },
         { screen: 'settings', label: 'Settings', iconDefault: require('./assets/icons/setting_logo.png'), iconActive: require('./assets/icons/settingShaded_logo.png') },
       ].map(({ screen, label, iconDefault, iconActive }) => {
-        const active = currentScreen === screen;
+        const active = currentScreen === screen || (screen === 'home' && currentScreen === 'history');
         return (
-          <TouchableOpacity
-            key={screen}
-            onPress={() => setCurrentScreen(screen)}
-            style={styles.tabItem}
-          >
+          <TouchableOpacity key={screen} onPress={() => setCurrentScreen(screen)} style={styles.tabItem}>
             <Image source={active ? iconActive : iconDefault} style={styles.tabIcon} />
             <Text style={[styles.tabText, active && { color: COLORS.accent }]}>{label}</Text>
           </TouchableOpacity>
@@ -331,143 +394,172 @@ const PixelDermApp = () => {
     </View>
   );
 
-  // --- SCREEN RENDERERS ---
+  // --- SCREENS ---
   const renderLanding = () => (
     <View style={[styles.fullScreen, { backgroundColor: COLORS.white }]}>
       <View style={styles.logoArea}>
-        <Image
-          source={require('./assets/icons/pixelDerm_logo.png')}
-          style={styles.appLogo}
-          resizeMode="contain"
-        />
+        <Image source={require('./assets/icons/pixelDerm_logo.png')} style={styles.appLogo} resizeMode="contain" />
       </View>
       <View style={styles.bottomHero}>
         <Text style={styles.welcomeTitle}>Welcome to PixelDerm!</Text>
-        <TouchableOpacity style={styles.btnFull} onPress={() => setCurrentScreen('input')}>
+        <TouchableOpacity style={styles.btnFull} onPress={handleAddProfile}>
           <Text style={styles.btnText}>Get Started</Text>
         </TouchableOpacity>
       </View>
     </View>
   );
 
-  // ── INPUT SCREEN ──────────────────────────────────────────────────────────
-  const renderInput = () => (
-    <View style={[styles.fullScreen, { backgroundColor: COLORS.white }]}>
-      <View style={styles.formContent}>
-        <Text style={styles.screenHeader}>Your Profile</Text>
-        <Text style={styles.inputLabel}>Enter your information to get started</Text>
-
-        {/* Age — numpad only */}
-        <TextInput
-          style={styles.inputField}
-          placeholder="Age"
-          placeholderTextColor="#AAAAAA"
-          keyboardType="number-pad"
-          value={age}
-          onChangeText={(t) => setAge(t.replace(/[^0-9]/g, ''))}
-          maxLength={3}
-        />
-
-        {/* Sex — dropdown */}
-        <DropdownField
-          placeholder="Sex"
-          value={sex}
-          options={['Male', 'Female', 'Rather not say']}
-          onSelect={setSex}
-        />
-
-        {/* Skin Type — dropdown */}
-        <DropdownField
-          placeholder="Skin Type"
-          value={skinType}
-          options={['Dry', 'Oily', 'Normal', 'Sensitive']}
-          onSelect={setSkinType}
-        />
-
-        <TouchableOpacity
-          style={[styles.btnFull, { marginTop: 40 }]}
-          onPress={async () => {
-            await Promise.all([
-              AsyncStorage.setItem(STORAGE_KEYS.profile, JSON.stringify({ age, sex, skinType })),
-              AsyncStorage.setItem(STORAGE_KEYS.onboarded, 'true'),
-            ]).catch(() => {});
-            setCurrentScreen('home');
-          }}
-        >
-          <Text style={styles.btnText}>Continue</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-
-  // ── HOME SCREEN ───────────────────────────────────────────────────────────
-  const renderHome = () => (
-    <View style={styles.fullScreen}>
-      <View style={styles.innerCanvas}>
-        <View style={{ paddingHorizontal: 20, paddingTop: 20 }}>
-          <Text style={styles.dashboardTitle}>Homepage</Text>
-          <Text style={styles.sectionHeader}>Monitoring Areas</Text>
-        </View>
-
-        {/* Horizontal chip bar lives outside ScrollView so it doesn't clip */}
-        <BodyPartTab
-          parts={monitoredParts}
-          activePart={activePart}
-          onSelect={setActivePart}
-          onAdd={() => setShowAddPartModal(true)}
-        />
-
-        <ScrollView style={[styles.scrollContainer, { marginTop: 0 }]} showsVerticalScrollIndicator={false}>
-          {analysisResult ? (
-            <>
-              {/* Per-part data card */}
-              <View style={[styles.cardBlock, { marginTop: 4 }]}>
-                <Text style={[styles.cardTitle, { marginBottom: 2 }]}>{activePart}</Text>
-                <Text style={styles.textSmall}>
-                  Last scanned: {new Date(analysisResult.analysis.timestamp).toLocaleDateString()}
-                </Text>
-              </View>
-
-              <View style={styles.scoreCard}>
-                <View>
-                  <Text style={styles.cardLabel}>Last Analysis</Text>
-                  <Text style={styles.cardValue}>
-                    {new Date(analysisResult.analysis.timestamp).toLocaleString()}
+  const renderHome = () => {
+    const monitoredParts = activeProfile?.monitoredParts ?? ['Face'];
+    const activePart = activeProfile?.activePart ?? 'Face';
+    const partHistory = (activeProfile?.scanHistory ?? {})[activePart] ?? [];
+    const lastAnalysis = partHistory.length > 0 ? partHistory[0] : null;
+    const uvScore = lastAnalysis ? computeSkinScore(lastAnalysis.features) : 0;
+    return (
+      <View style={styles.fullScreen}>
+        <View style={styles.innerCanvas}>
+          <View style={{ paddingHorizontal: 20, paddingTop: 20 }}>
+            <Text style={styles.dashboardTitle}>{activeProfile ? `Hi, ${activeProfile.name}` : 'Homepage'}</Text>
+            <Text style={styles.sectionHeader}>Monitoring Areas</Text>
+          </View>
+          <BodyPartTab
+            parts={monitoredParts}
+            activePart={activePart}
+            onSelect={(part) => updateActiveProfile({ activePart: part })}
+            onAdd={() => setShowAddPartModal(true)}
+          />
+          <ScrollView style={[styles.scrollContainer, { marginTop: 0 }]} showsVerticalScrollIndicator={false}>
+            {lastAnalysis ? (
+              <>
+                <View style={[styles.cardBlock, { marginTop: 4 }]}>
+                  <Text style={[styles.cardTitle, { marginBottom: 2 }]}>{activePart}</Text>
+                  <Text style={styles.textSmall}>Last scanned: {new Date(lastAnalysis.analysis.timestamp).toLocaleDateString()}</Text>
+                  <Text style={[styles.textSmall, { color: COLORS.accent, marginTop: 4 }]}>
+                    Next scan recommended: {new Date(new Date(lastAnalysis.analysis.timestamp).getTime() + 7 * 24 * 60 * 60 * 1000).toLocaleDateString()}
                   </Text>
                 </View>
-                <View style={styles.scoreCircle}>
-                  <Text style={[styles.scoreNum, { color: COLORS.text }]}>
-                    {Math.min(100, Math.round(analysisResult.features.textureScore * 100))}
-                  </Text>
-                  <Text style={styles.scoreTotal}>/100</Text>
-                  <Text style={styles.scoreLabel}>UV Damage</Text>
+                <View style={styles.scoreCard}>
+                  <View>
+                    <Text style={styles.cardLabel}>Last Analysis</Text>
+                    <Text style={styles.cardValue}>{new Date(lastAnalysis.analysis.timestamp).toLocaleString()}</Text>
+                  </View>
+                  <View style={styles.scoreCircle}>
+                    <Text style={[styles.scoreNum, { color: COLORS.text }]}>{uvScore}%</Text>
+                    <Text style={styles.scoreLabel}>Skin Score</Text>
+                  </View>
                 </View>
-              </View>
-
-              <Text style={styles.sectionHeader}>Tips</Text>
-              <View style={styles.cardBlock}>
-                {analysisResult.recommendation.advice
-                  .split(/\.\s+/)
-                  .filter(Boolean)
-                  .map((tip, i) => (
+                <Text style={styles.sectionHeader}>Tips</Text>
+                <View style={styles.cardBlock}>
+                  {lastAnalysis.recommendation.advice.split(/\.\s+/).filter(Boolean).map((tip, i) => (
                     <View key={i} style={styles.tipRow}>
                       <Text style={styles.tipBullet}>•</Text>
                       <Text style={styles.tipText}>{tip}</Text>
                     </View>
                   ))}
+                </View>
+                <TouchableOpacity style={styles.historyBtn} onPress={() => setCurrentScreen('history')}>
+                  <Text style={styles.historyBtnText}>View History</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyStateTitle}>No scans yet</Text>
+                <Text style={styles.emptyStateText}>Take your first photo to see your skin analysis, scores, and personalized tips here.</Text>
+                <TouchableOpacity style={[styles.btnFull, { marginTop: 20 }]} onPress={() => setCurrentScreen('upload')}>
+                  <Text style={styles.btnText}>Take First Scan</Text>
+                </TouchableOpacity>
               </View>
-            </>
-          ) : (
+            )}
+            <View style={{ height: 40 }} />
+          </ScrollView>
+        </View>
+        <TabBar />
+        <Modal visible={showAddPartModal} transparent animationType="slide">
+          <View style={styles.modalOverlay}>
+            <View style={[styles.dropdownSheet, { maxHeight: '75%' }]}>
+              <Text style={styles.dropdownTitle}>Add a Body Area to Monitor</Text>
+              <FlatList
+                data={AVAILABLE_BODY_PARTS.filter(p => !monitoredParts.includes(p))}
+                keyExtractor={(item) => item}
+                renderItem={({ item }) => (
+                  <TouchableOpacity style={styles.dropdownItem} onPress={() => handleAddBodyPart(item)}>
+                    <Text style={styles.dropdownItemText}>{item}</Text>
+                    <Text style={{ color: COLORS.primary }}>+ Add</Text>
+                  </TouchableOpacity>
+                )}
+                ListEmptyComponent={
+                  <Text style={[styles.textSmall, { textAlign: 'center', padding: 20, color: COLORS.subtext }]}>All areas are already being monitored.</Text>
+                }
+              />
+              <TouchableOpacity style={[styles.btnFull, { marginTop: 10, marginBottom: 0 }]} onPress={() => setShowAddPartModal(false)}>
+                <Text style={styles.btnText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+      </View>
+    );
+  };
+
+  const renderProfile = () => (
+    <View style={styles.fullScreen}>
+      <View style={styles.innerCanvas}>
+        <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
+          <View style={styles.profileHeader}>
+            <View>
+              <Text style={styles.dashboardTitle}>Profile</Text>
+              <Text style={styles.subtext}>Edit your information</Text>
+            </View>
+            <TouchableOpacity style={styles.addProfileBtn} onPress={handleAddProfile}>
+              <Text style={styles.addProfileBtnText}>Add Profile</Text>
+            </TouchableOpacity>
+          </View>
+
+          {profiles.map(profile => (
+            <TouchableOpacity
+              key={profile.id}
+              style={[styles.profileCard, activeProfile?.id === profile.id && styles.profileCardActive]}
+              onPress={() => { setActiveProfileId(profile.id); setCurrentScreen('home'); }}
+              activeOpacity={0.8}
+            >
+              <View style={styles.profileCardRow}>
+                <View style={styles.profileIconCircle}>
+                  <Text style={styles.profileIconText}>👤</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.profileName}>{profile.name}</Text>
+                  <View style={styles.profileStats}>
+                    <View style={styles.profileStat}>
+                      <Text style={styles.profileStatLabel}>Sex</Text>
+                      <Text style={styles.profileStatValue}>{profile.sex || '—'}</Text>
+                    </View>
+                    <View style={styles.profileStat}>
+                      <Text style={styles.profileStatLabel}>Skin type</Text>
+                      <Text style={styles.profileStatValue}>{profile.skinType || '—'}</Text>
+                    </View>
+                    <View style={styles.profileStat}>
+                      <Text style={styles.profileStatLabel}>Age</Text>
+                      <Text style={styles.profileStatValue}>{profile.age || '—'}</Text>
+                    </View>
+                  </View>
+                </View>
+                <TouchableOpacity
+                  style={styles.profileMenuBtn}
+                  onPress={() => handleProfileMenu(profile)}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <Text style={styles.profileMenuIcon}>⋮</Text>
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
+          ))}
+
+          {profiles.length === 0 && (
             <View style={styles.emptyState}>
-              <Text style={styles.emptyStateTitle}>No scans yet</Text>
-              <Text style={styles.emptyStateText}>
-                Take your first photo to see your skin analysis, scores, and personalized tips here.
-              </Text>
-              <TouchableOpacity
-                style={[styles.btnFull, { marginTop: 20 }]}
-                onPress={() => setCurrentScreen('upload')}
-              >
-                <Text style={styles.btnText}>Take First Scan</Text>
+              <Text style={styles.emptyStateTitle}>No profiles yet</Text>
+              <Text style={styles.emptyStateText}>Add a profile to start tracking your skin health.</Text>
+              <TouchableOpacity style={[styles.btnFull, { marginTop: 20 }]} onPress={handleAddProfile}>
+                <Text style={styles.btnText}>Add Profile</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -475,95 +567,29 @@ const PixelDermApp = () => {
         </ScrollView>
       </View>
       <TabBar />
-
-      {/* Add Body Part Modal */}
-      <Modal visible={showAddPartModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={[styles.dropdownSheet, { maxHeight: '75%' }]}>
-            <Text style={styles.dropdownTitle}>Add a Body Area to Monitor</Text>
-            <FlatList
-              data={AVAILABLE_BODY_PARTS.filter((p) => !monitoredParts.includes(p))}
-              keyExtractor={(item) => item}
-              renderItem={({ item }) => (
-                <TouchableOpacity style={styles.dropdownItem} onPress={() => handleAddBodyPart(item)}>
-                  <Text style={styles.dropdownItemText}>{item}</Text>
-                  <Text style={{ color: COLORS.primary }}>+ Add</Text>
-                </TouchableOpacity>
-              )}
-              ListEmptyComponent={
-                <Text style={[styles.textSmall, { textAlign: 'center', padding: 20, color: COLORS.subtext }]}>
-                  All available areas are already being monitored.
-                </Text>
-              }
-            />
-            <TouchableOpacity
-              style={[styles.btnFull, { marginTop: 10, marginBottom: 0 }]}
-              onPress={() => setShowAddPartModal(false)}
-            >
-              <Text style={styles.btnText}>Done</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 
-  const renderProfile = () => (
-    <View style={styles.fullScreen}>
-      <View style={styles.innerCanvas}>
-        <ScrollView style={styles.scrollContainer}>
-          <Text style={styles.dashboardTitle}>Profile</Text>
-          <Text style={styles.subtext}>Edit your information</Text>
-          <View style={[styles.cardBlock, { marginTop: 20 }]}>
-            <View style={styles.statLine}><Text style={styles.statLabel}>Age</Text><Text style={styles.statVal}>{age ? `${age} years old` : '—'}</Text></View>
-            <View style={styles.statLine}><Text style={styles.statLabel}>Sex</Text><Text style={styles.statVal}>{sex || '—'}</Text></View>
-            <View style={[styles.statLine, { borderBottomWidth: 0 }]}><Text style={styles.statLabel}>Skin type</Text><Text style={styles.statVal}>{skinType || '—'}</Text></View>
-          </View>
-        </ScrollView>
-      </View>
-      <TabBar />
-    </View>
-  );
-
-  // ── UPLOAD SCREEN ─────────────────────────────────────────────────────────
   const renderUpload = () => (
     <View style={styles.fullScreen}>
       <View style={styles.innerCanvas}>
         <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
           <Text style={styles.dashboardTitle}>Skin Analysis</Text>
           <Text style={styles.subtext}>Take a photo or upload from gallery</Text>
-
           <View style={styles.outlinedCard}>
             <Text style={styles.cardTitle}>Image of Skin</Text>
-
-            {/* Mode toggle buttons */}
             <View style={styles.uploadModeRow}>
-              <TouchableOpacity
-                style={[styles.modePill, uploadMode === 'camera' && styles.modePillActive]}
-                onPress={handleSwitchToCamera}
-              >
-                <Text style={[styles.modePillText, uploadMode === 'camera' && styles.modePillTextActive]}>
-                  Camera
-                </Text>
+              <TouchableOpacity style={[styles.modePill, uploadMode === 'camera' && styles.modePillActive]} onPress={() => { setSelectedImage(null); setUploadMode('camera'); }}>
+                <Text style={[styles.modePillText, uploadMode === 'camera' && styles.modePillTextActive]}>Camera</Text>
               </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modePill, uploadMode === 'gallery' && styles.modePillActive]}
-                onPress={handlePickFromGallery}
-              >
-                <Text style={[styles.modePillText, uploadMode === 'gallery' && styles.modePillTextActive]}>
-                  Gallery
-                </Text>
+              <TouchableOpacity style={[styles.modePill, uploadMode === 'gallery' && styles.modePillActive]} onPress={handlePickFromGallery}>
+                <Text style={[styles.modePillText, uploadMode === 'gallery' && styles.modePillTextActive]}>Gallery</Text>
               </TouchableOpacity>
             </View>
-
-            {/* Preview / Camera area */}
             <View style={styles.cameraPlaceholder}>
               {uploadMode === null && (
-                <Text style={{ color: COLORS.subtext, textAlign: 'center', paddingHorizontal: 20 }}>
-                  Select Camera or Gallery above to get started
-                </Text>
+                <Text style={{ color: COLORS.subtext, textAlign: 'center', paddingHorizontal: 20 }}>Select Camera or Gallery above to get started</Text>
               )}
-
               {uploadMode === 'camera' && (
                 <>
                   {!hasPermission ? (
@@ -577,24 +603,9 @@ const PixelDermApp = () => {
                         device={device}
                         isActive={currentScreen === 'upload' && uploadMode === 'camera'}
                         outputs={[photoOutput]}
-                        torchMode={device?.hasTorch ? (torchOn ? 'on' : 'off') : undefined}
                       />
                       <View style={styles.cameraControls}>
-                        {cameraPosition === 'back' && device?.hasTorch && (
-                          <TouchableOpacity
-                            style={[styles.cameraControlBtn, torchOn && styles.cameraControlBtnActive]}
-                            onPress={() => setTorchOn(v => !v)}
-                          >
-                            <Text style={styles.cameraControlText}>⚡</Text>
-                          </TouchableOpacity>
-                        )}
-                        <TouchableOpacity
-                          style={styles.cameraControlBtn}
-                          onPress={() => {
-                            setTorchOn(false);
-                            setCameraPosition(p => p === 'back' ? 'front' : 'back');
-                          }}
-                        >
+                        <TouchableOpacity style={styles.cameraControlBtn} onPress={() => setCameraPosition(p => p === 'back' ? 'front' : 'back')}>
                           <Text style={styles.cameraControlText}>🔄</Text>
                         </TouchableOpacity>
                       </View>
@@ -602,21 +613,16 @@ const PixelDermApp = () => {
                   )}
                 </>
               )}
-
               {uploadMode === 'gallery' && selectedImage && (
                 <Image source={{ uri: selectedImage.uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
               )}
             </View>
-
             <Text style={styles.centerSubtext}>JPG or PNG (max. 5MB)</Text>
-
-            {/* Action buttons vary by mode */}
             {uploadMode === 'camera' && (
               <TouchableOpacity style={styles.btnFull} onPress={handleCapture}>
                 <Text style={styles.btnText}>Take Photo</Text>
               </TouchableOpacity>
             )}
-
             {uploadMode === 'gallery' && selectedImage && (
               <View style={{ gap: 8, marginTop: 10 }}>
                 <TouchableOpacity style={styles.btnFull} onPress={handleCapture}>
@@ -627,14 +633,12 @@ const PixelDermApp = () => {
                 </TouchableOpacity>
               </View>
             )}
-
             {uploadMode === 'gallery' && !selectedImage && (
               <TouchableOpacity style={[styles.btnFull, { marginTop: 10 }]} onPress={handlePickFromGallery}>
                 <Text style={styles.btnText}>Choose from Gallery</Text>
               </TouchableOpacity>
             )}
           </View>
-
           <View style={styles.outlinedCard}>
             <Text style={styles.cardTitle}>Photo Tips</Text>
             <Text style={styles.bulletText}>• Use natural lighting if possible</Text>
@@ -644,7 +648,6 @@ const PixelDermApp = () => {
             <Text style={[styles.cardTitle, { marginTop: 15 }]}>Note</Text>
             <Text style={styles.bulletText}>• Users with vitiligo <Text style={{ fontWeight: 'bold' }}>may</Text> receive inaccurate results</Text>
           </View>
-
           <View style={{ height: 40 }} />
         </ScrollView>
       </View>
@@ -670,151 +673,216 @@ const PixelDermApp = () => {
   );
 
   const renderAnalysis = () => {
+    const analysisResult = activeProfile?.lastAnalysis;
     if (!analysisResult) return null;
-
     const { features, baseline, recommendation, analysis } = analysisResult;
-
-    const riskMap: Record<string, { label: string; color: string }> = {
-      'Stable':             { label: 'Stable',    color: COLORS.riskLow },
-      'Regression Detected':{ label: 'Regression',color: COLORS.riskModerate },
-      'Alert':              { label: 'Alert',     color: COLORS.riskHigh },
-    };
-    const riskInfo = riskMap[recommendation.status] ?? { label: recommendation.status, color: COLORS.riskHigh };
-
-    const pigmentPct  = (features.pigmentation * 100).toFixed(1);
-    const textureFmt  = features.textureScore.toFixed(3);
-    const scanDate    = new Date(analysis.timestamp).toLocaleString();
-
-    // Baseline delta helpers
-    const spotDelta       = baseline ? features.spotCount - baseline.spotCount : null;
-    const textureDelta    = baseline ? (features.textureScore - baseline.textureScore).toFixed(3) : null;
-    const pigmentDelta    = baseline ? ((features.pigmentation - baseline.pigmentation) * 100).toFixed(1) : null;
-
-    const fmt = (n: number | null, unit = '') =>
-      n === null ? '—' : `${n > 0 ? '+' : ''}${n}${unit}`;
+    const skinScore = computeSkinScore(features);
+    const riskInfo = skinScoreRisk(skinScore);
+    const pigmentPct = (features.pigmentation * 100).toFixed(1);
+    const textureFmt = Math.min(100, features.textureScore * 100).toFixed(1) + '%';
+    const scanDate = new Date(analysis.timestamp).toLocaleString();
+    const spotDelta = baseline ? features.spotCount - baseline.spotCount : null;
+    const textureDeltaRaw = baseline ? (features.textureScore - baseline.textureScore) * 100 : null;
+    const textureDelta = textureDeltaRaw !== null ? textureDeltaRaw.toFixed(1) : null;
+    const pigmentDelta = baseline ? ((features.pigmentation - baseline.pigmentation) * 100).toFixed(1) : null;
+    const fmt = (n: number | null, unit = '') => n === null ? '—' : `${n > 0 ? '+' : ''}${n}${unit}`;
+    const activePart = activeProfile?.activePart ?? 'Face';
 
     return (
-    <View style={styles.fullScreen}>
-      <View style={styles.innerCanvas}>
-        <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-          <Text style={styles.dashboardTitle}>Analysis Complete</Text>
-          <Text style={styles.subtext}>{scanDate}</Text>
-
-          {/* Status strip */}
-          <View style={[styles.outlinedCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
-            <View>
-              <Text style={styles.cardLabel}>Status</Text>
-              <Text style={[styles.cardValue, { color: riskInfo.color }]}>{riskInfo.label}</Text>
-            </View>
-            <View style={{ alignItems: 'flex-end' }}>
-              <Text style={styles.cardLabel}>Area</Text>
-              <Text style={styles.cardValue}>{activePart}</Text>
-            </View>
-          </View>
-
-          <View style={styles.customTabBar}>
-            {['results', 'comparison'].map((tab) => (
-              <TouchableOpacity
-                key={tab}
-                style={[styles.customTab, analysisTab === tab && styles.customTabActive]}
-                onPress={() => setAnalysisTab(tab)}
-              >
-                <Text style={[styles.customTabText, analysisTab === tab && styles.customTabTextActive]}>
-                  {tab === 'results' ? 'Results' : 'vs Baseline'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {analysisTab === 'results' ? (
-            <>
-              <View style={styles.outlinedCard}>
-                <Text style={styles.cardTitle}>Detected Metrics</Text>
-                <View style={styles.resultRow}>
-                  <Text style={styles.resultText}>Spots detected</Text>
-                  <Text style={[styles.resultText, { fontWeight: 'bold', color: riskInfo.color }]}>{features.spotCount}</Text>
-                </View>
-                <View style={styles.resultRow}>
-                  <Text style={styles.resultText}>Texture score</Text>
-                  <Text style={[styles.resultText, { fontWeight: 'bold' }]}>{textureFmt}</Text>
-                </View>
-                <View style={[styles.resultRow, { borderBottomWidth: 0 }]}>
-                  <Text style={styles.resultText}>Pigmentation</Text>
-                  <Text style={[styles.resultText, { fontWeight: 'bold' }]}>{pigmentPct}%</Text>
-                </View>
+      <View style={styles.fullScreen}>
+        <View style={styles.innerCanvas}>
+          <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
+            <Text style={styles.dashboardTitle}>Analysis Complete</Text>
+            <Text style={styles.subtext}>{scanDate}</Text>
+            <View style={[styles.outlinedCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
+              <View>
+                <Text style={styles.cardLabel}>Risk Level</Text>
+                <Text style={[styles.cardValue, { color: riskInfo.color }]}>{riskInfo.label}</Text>
               </View>
-
-              <View style={[styles.outlinedCard, { backgroundColor: COLORS.secondary + '40' }]}>
-                <Text style={styles.cardTitle}>Recommendation</Text>
-                <View style={styles.recommendationBubble}>
-                  <Text style={styles.textSmall}>{recommendation.advice}</Text>
+              <View style={{ alignItems: 'center' }}>
+                <Text style={styles.cardLabel}>Skin Score</Text>
+                <Text style={[styles.cardValue, { color: riskInfo.color }]}>{skinScore}%</Text>
+              </View>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={styles.cardLabel}>Area</Text>
+                <Text style={styles.cardValue}>{activePart}</Text>
+              </View>
+            </View>
+            <View style={styles.customTabBar}>
+              {['results', 'comparison'].map((tab) => (
+                <TouchableOpacity key={tab} style={[styles.customTab, analysisTab === tab && styles.customTabActive]} onPress={() => setAnalysisTab(tab)}>
+                  <Text style={[styles.customTabText, analysisTab === tab && styles.customTabTextActive]}>{tab === 'results' ? 'Results' : 'vs Baseline'}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {analysisTab === 'results' ? (
+              <>
+                <View style={styles.outlinedCard}>
+                  <Text style={styles.cardTitle}>Detected Metrics</Text>
+                  <View style={styles.resultRow}>
+                    <Text style={styles.resultText}>Spots detected</Text>
+                    <Text style={[styles.resultText, { fontWeight: 'bold', color: riskInfo.color }]}>{features.spotCount}</Text>
+                  </View>
+                  <View style={styles.resultRow}>
+                    <Text style={styles.resultText}>Texture score</Text>
+                    <Text style={[styles.resultText, { fontWeight: 'bold' }]}>{textureFmt}</Text>
+                  </View>
+                  <View style={[styles.resultRow, { borderBottomWidth: 0 }]}>
+                    <Text style={styles.resultText}>Pigmentation</Text>
+                    <Text style={[styles.resultText, { fontWeight: 'bold' }]}>{pigmentPct}%</Text>
+                  </View>
                 </View>
-                {riskInfo.label === 'Alert' && (
-                  <View style={styles.warningBox}>
-                    <Text style={styles.warningText}>High spot density detected. Please consult a dermatologist for a professional evaluation.</Text>
+                <View style={[styles.outlinedCard, { backgroundColor: COLORS.secondary + '40' }]}>
+                  <Text style={styles.cardTitle}>Recommendation</Text>
+                  <View style={styles.recommendationBubble}>
+                    <Text style={styles.textSmall}>{recommendation.advice}</Text>
+                  </View>
+                  {riskInfo.label === 'High' && (
+                    <View style={styles.warningBox}>
+                      <Text style={styles.warningText}>High spot density detected. Please consult a dermatologist for a professional evaluation.</Text>
+                    </View>
+                  )}
+                </View>
+              </>
+            ) : (
+              <>
+                {baseline ? (
+                  <>
+                    <View style={styles.outlinedCard}>
+                      <Text style={styles.cardTitle}>Overall Change</Text>
+                      <View style={styles.recommendationBubble}>
+                        <Text style={[styles.textSmall, { fontWeight: '600', color: riskInfo.color }]}>
+                          {recommendation.status === 'Stable' ? 'Stable' : recommendation.status === 'Regression Detected' ? 'Regression Detected' : 'Improving'}
+                        </Text>
+                        <Text style={[styles.textSmall, { marginTop: 4 }]}>{recommendation.status === 'Stable' ? 'Your skin metrics are stable compared to your baseline. Keep up your current routine.' : recommendation.advice}</Text>
+                      </View>
+                    </View>
+                    <View style={styles.outlinedCard}>
+                      <Text style={styles.cardTitle}>Current vs Baseline</Text>
+                      <View style={styles.resultRow}>
+                        <Text style={styles.resultText}>Spots</Text>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={styles.resultText}>{features.spotCount} <Text style={styles.subtext}>(baseline {baseline.spotCount})</Text></Text>
+                          <Text style={{ color: spotDelta! > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>{fmt(spotDelta)}</Text>
+                        </View>
+                      </View>
+                      <View style={styles.resultRow}>
+                        <Text style={styles.resultText}>Texture</Text>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={styles.resultText}>{textureFmt} <Text style={styles.subtext}>(baseline {Math.min(100, baseline.textureScore * 100).toFixed(1)}%)</Text></Text>
+                          <Text style={{ color: (textureDeltaRaw ?? 0) > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>{textureDelta !== null ? `${(textureDeltaRaw ?? 0) > 0 ? '+' : ''}${textureDelta}%` : '—'}</Text>
+                        </View>
+                      </View>
+                      <View style={[styles.resultRow, { borderBottomWidth: 0 }]}>
+                        <Text style={styles.resultText}>Pigmentation</Text>
+                        <View style={{ alignItems: 'flex-end' }}>
+                          <Text style={styles.resultText}>{pigmentPct}% <Text style={styles.subtext}>(baseline {(baseline.pigmentation * 100).toFixed(1)}%)</Text></Text>
+                          <Text style={{ color: Number(pigmentDelta) > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>{pigmentDelta !== null ? `${Number(pigmentDelta) > 0 ? '+' : ''}${pigmentDelta}%` : '—'}</Text>
+                        </View>
+                      </View>
+                    </View>
+                  </>
+                ) : (
+                  <View style={styles.outlinedCard}>
+                    <Text style={[styles.textSmall, { color: COLORS.subtext, textAlign: 'center', paddingVertical: 20 }]}>
+                      This is your first scan for {activePart}.{'\n'}A baseline has been set — future scans will be compared against it.
+                    </Text>
                   </View>
                 )}
-              </View>
-            </>
-          ) : (
-            <>
-              {baseline ? (
-                <>
-                  <View style={styles.outlinedCard}>
-                    <Text style={styles.cardTitle}>Current vs Baseline</Text>
-                    <View style={styles.resultRow}>
-                      <Text style={styles.resultText}>Spots</Text>
-                      <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={styles.resultText}>{features.spotCount} <Text style={styles.subtext}>(baseline {baseline.spotCount})</Text></Text>
-                        <Text style={{ color: spotDelta! > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>
-                          {fmt(spotDelta)}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.resultRow}>
-                      <Text style={styles.resultText}>Texture</Text>
-                      <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={styles.resultText}>{textureFmt} <Text style={styles.subtext}>(baseline {baseline.textureScore.toFixed(3)})</Text></Text>
-                        <Text style={{ color: Number(textureDelta) > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>
-                          {textureDelta !== null ? `${Number(textureDelta) > 0 ? '+' : ''}${textureDelta}` : '—'}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={[styles.resultRow, { borderBottomWidth: 0 }]}>
-                      <Text style={styles.resultText}>Pigmentation</Text>
-                      <View style={{ alignItems: 'flex-end' }}>
-                        <Text style={styles.resultText}>{pigmentPct}% <Text style={styles.subtext}>(baseline {(baseline.pigmentation * 100).toFixed(1)}%)</Text></Text>
-                        <Text style={{ color: Number(pigmentDelta) > 0 ? COLORS.riskHigh : COLORS.riskLow, fontWeight: 'bold' }}>
-                          {pigmentDelta !== null ? `${Number(pigmentDelta) > 0 ? '+' : ''}${pigmentDelta}%` : '—'}
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-                  <View style={styles.outlinedCard}>
-                    <Text style={styles.cardTitle}>Overall Change</Text>
-                    <View style={styles.recommendationBubble}>
-                      <Text style={styles.textSmall}>{recommendation.status === 'Stable'
-                        ? 'Your skin metrics are stable compared to your baseline. Keep up your current routine.'
-                        : recommendation.advice}
-                      </Text>
-                    </View>
-                  </View>
-                </>
-              ) : (
-                <View style={styles.outlinedCard}>
-                  <Text style={[styles.textSmall, { color: COLORS.subtext, textAlign: 'center', paddingVertical: 20 }]}>
-                    This is your first scan for {activePart}.{'\n'}A baseline has been set — future scans will be compared against it.
-                  </Text>
-                </View>
-              )}
-            </>
-          )}
-          <View style={{ height: 40 }} />
-        </ScrollView>
+              </>
+            )}
+            <View style={{ height: 40 }} />
+          </ScrollView>
+        </View>
+        <TabBar />
       </View>
-      <TabBar />
-    </View>
-  );
+    );
+  };
+
+  const renderHistory = () => {
+    const activePart = activeProfile?.activePart ?? 'Face';
+    const history = (activeProfile?.scanHistory ?? {})[activePart] ?? [];
+
+    const handleDeleteScan = (index: number) => {
+      Alert.alert('Delete Scan', 'Remove this scan from history?', [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete', style: 'destructive',
+          onPress: () => {
+            const cur = activeProfile?.scanHistory ?? {};
+            const updated = [...(cur[activePart] ?? [])];
+            updated.splice(index, 1);
+            updateActiveProfile({
+              scanHistory: { ...cur, [activePart]: updated },
+              lastAnalysis: updated.length > 0 ? updated[0] : null,
+            });
+          },
+        },
+      ]);
+    };
+
+    return (
+      <View style={styles.fullScreen}>
+        <View style={styles.innerCanvas}>
+          <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 5 }}>
+              <View>
+                <Text style={styles.dashboardTitle}>History</Text>
+                <Text style={styles.subtext}>View your past scans.</Text>
+              </View>
+              <View style={styles.areaTag}>
+                <Text style={styles.areaTagText}>{activePart}</Text>
+              </View>
+            </View>
+            {history.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyStateTitle}>No scans yet</Text>
+                <Text style={styles.emptyStateText}>Scan your {activePart} to start building your history.</Text>
+              </View>
+            ) : (
+              history.map((scan, index) => {
+                const date = new Date(scan.analysis.timestamp).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+                const spotCount = scan.features.spotCount;
+                const pigmentPct = Math.round(scan.features.pigmentation * 100);
+                const textureVal = parseFloat(Math.min(100, scan.features.textureScore * 100).toFixed(2));
+                const scanScore = computeSkinScore(scan.features);
+                const scoreColor = skinScoreRisk(scanScore).color;
+                return (
+                  <View key={scan.analysis.analysisId ?? index} style={styles.historyCard}>
+                    <View style={styles.historyCardHeader}>
+                      <Text style={styles.historyCardDate}>{date}</Text>
+                      <TouchableOpacity onPress={() => handleDeleteScan(index)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                        <Text style={styles.profileMenuIcon}>⋮</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <View style={styles.historyCardMetrics}>
+                      <View style={styles.historyMetric}>
+                        <Text style={styles.historyMetricLabel}>Spot</Text>
+                        <Text style={styles.historyMetricValue}>{spotCount}</Text>
+                      </View>
+                      <View style={styles.historyMetric}>
+                        <Text style={styles.historyMetricLabel}>Hyperpigmentation</Text>
+                        <Text style={styles.historyMetricValue}>{pigmentPct}%</Text>
+                      </View>
+                      <View style={styles.historyMetric}>
+                        <Text style={styles.historyMetricLabel}>Texture</Text>
+                        <Text style={styles.historyMetricValue}>{textureVal}%</Text>
+                      </View>
+                      <View style={styles.historyMetric}>
+                        <Text style={styles.historyMetricLabel}>Skin Score</Text>
+                        <Text style={[styles.historyMetricValue, { color: scoreColor }]}>{scanScore}%</Text>
+                      </View>
+                    </View>
+                  </View>
+                );
+              })
+            )}
+            <View style={{ height: 40 }} />
+          </ScrollView>
+        </View>
+        <TabBar />
+      </View>
+    );
   };
 
   const renderSettings = () => (
@@ -823,73 +891,30 @@ const PixelDermApp = () => {
         <ScrollView style={styles.scrollContainer}>
           <Text style={styles.dashboardTitle}>Settings</Text>
           <Text style={styles.subtext}>Manage your app preferences</Text>
-
-          <View style={[styles.outlinedCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
-            <View>
-              <Text style={styles.cardTitle}>Notifications</Text>
-              <Text style={styles.textSmall}>Toggle push notifications</Text>
-            </View>
-            <Switch
-              value={notificationsEnabled}
-              onValueChange={setNotificationsEnabled}
-              trackColor={{ false: '#767577', true: COLORS.primary }}
-            />
-          </View>
-
-          <View style={styles.outlinedCard}>
-            <Text style={styles.cardTitle}>Information</Text>
-            <TouchableOpacity style={styles.settingRow}>
-              <Text style={styles.textSmall}>About UV Skin Analysis</Text>
-              <Text style={styles.subtext}>{'>'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.settingRow, { borderBottomWidth: 0, paddingBottom: 0 }]}>
-              <Text style={styles.textSmall}>Privacy Policy</Text>
-              <Text style={styles.subtext}>{'>'}</Text>
-            </TouchableOpacity>
-          </View>
-
           <View style={styles.outlinedCard}>
             <Text style={styles.cardTitle}>Data Management</Text>
             <TouchableOpacity
               style={styles.btnDanger}
-              onPress={() =>
-                Alert.alert(
-                  'Clear All Data',
-                  'This will delete your profile and all scan history. This action cannot be undone.',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    {
-                      text: 'Clear',
-                      style: 'destructive',
-                      onPress: async () => {
-                        await AsyncStorage.multiRemove([
-                          '@pixelderm_user_id',
-                          STORAGE_KEYS.analysisResult,
-                          STORAGE_KEYS.monitoredParts,
-                          STORAGE_KEYS.activePart,
-                          STORAGE_KEYS.profile,
-                          STORAGE_KEYS.onboarded,
-                        ]).catch(() => {});
-                        // Reset all state
-                        setUserId(null);
-                        setAnalysisResult(null);
-                        setMonitoredParts(['Face']);
-                        setActivePart('Face');
-                        setAge('');
-                        setSex('');
-                        setSkinType('');
-                        setCurrentScreen('landing');
-                      },
+              onPress={() => Alert.alert(
+                'Clear All Data',
+                'This will delete all profiles and scan history. This action cannot be undone.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Clear', style: 'destructive',
+                    onPress: async () => {
+                      await AsyncStorage.multiRemove([STORAGE_KEYS.profiles, STORAGE_KEYS.activeProfileId, '@pixelderm_user_id']).catch(() => {});
+                      setProfiles([]);
+                      setActiveProfileId(null);
+                      setCurrentScreen('landing');
                     },
-                  ],
-                )
-              }
+                  },
+                ],
+              )}
             >
               <Text style={styles.btnText}>Clear All Data</Text>
             </TouchableOpacity>
-            <Text style={[styles.centerSubtext, { marginTop: 10, fontSize: 10 }]}>
-              This will delete your profile and all scan history.{'\n'}This action cannot be undone.
-            </Text>
+            <Text style={[styles.centerSubtext, { marginTop: 10, fontSize: 10 }]}>This will delete all profiles and scan history.{'\n'}This action cannot be undone.</Text>
           </View>
         </ScrollView>
       </View>
@@ -901,17 +926,47 @@ const PixelDermApp = () => {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar
-        barStyle={currentScreen === 'landing' || currentScreen === 'input' ? 'dark-content' : 'light-content'}
-        backgroundColor={currentScreen === 'landing' || currentScreen === 'input' ? COLORS.white : COLORS.primary}
+        barStyle={currentScreen === 'landing' ? 'dark-content' : 'light-content'}
+        backgroundColor={currentScreen === 'landing' ? COLORS.white : COLORS.primary}
       />
       {currentScreen === 'landing' && renderLanding()}
-      {currentScreen === 'input' && renderInput()}
       {currentScreen === 'home' && renderHome()}
       {currentScreen === 'profile' && renderProfile()}
       {currentScreen === 'upload' && renderUpload()}
       {currentScreen === 'processing' && renderProcessing()}
       {currentScreen === 'analysis' && renderAnalysis()}
+      {currentScreen === 'history' && renderHistory()}
       {currentScreen === 'settings' && renderSettings()}
+
+      {/* Profile Add/Edit Modal — global, renders over any screen */}
+      <Modal visible={showProfileModal} transparent animationType="slide">
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowProfileModal(false)}>
+          <View style={[styles.dropdownSheet, { paddingBottom: 40 }]}>
+            <Text style={styles.dropdownTitle}>{editingProfile ? 'Edit Profile' : 'Add Profile'}</Text>
+            <TextInput
+              style={styles.inputField}
+              placeholder="Name / Nickname"
+              placeholderTextColor="#AAAAAA"
+              value={formName}
+              onChangeText={setFormName}
+            />
+            <TextInput
+              style={styles.inputField}
+              placeholder="Age"
+              placeholderTextColor="#AAAAAA"
+              keyboardType="number-pad"
+              value={formAge}
+              onChangeText={t => setFormAge(t.replace(/[^0-9]/g, ''))}
+              maxLength={3}
+            />
+            <DropdownField placeholder="Sex" value={formSex} options={['Male', 'Female', 'Rather not say']} onSelect={setFormSex} />
+            <DropdownField placeholder="Skin Type" value={formSkinType} options={['Dry', 'Oily', 'Normal', 'Sensitive']} onSelect={setFormSkinType} />
+            <TouchableOpacity style={[styles.btnFull, { marginTop: 20 }]} onPress={handleSaveProfile}>
+              <Text style={styles.btnText}>{editingProfile ? 'Save Changes' : 'Add Profile'}</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -920,15 +975,7 @@ const PixelDermApp = () => {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.primary },
   fullScreen: { flex: 1, backgroundColor: COLORS.primary },
-  innerCanvas: {
-    flex: 1,
-    backgroundColor: COLORS.white,
-    borderRadius: 30,
-    marginHorizontal: 15,
-    marginTop: 15,
-    marginBottom: 5,
-    overflow: 'hidden',
-  },
+  innerCanvas: { flex: 1, backgroundColor: COLORS.white, borderRadius: 30, marginHorizontal: 15, marginTop: 15, marginBottom: 5, overflow: 'hidden' },
   scrollContainer: { flex: 1, paddingHorizontal: 20, paddingTop: 20 },
 
   // Text
@@ -950,100 +997,35 @@ const styles = StyleSheet.create({
   btnDanger: { backgroundColor: COLORS.riskHigh, width: '100%', height: 50, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 15 },
   btnText: { color: COLORS.white, fontSize: 16, fontWeight: '600' },
 
-  // Input fields
-  inputField: {
-    backgroundColor: COLORS.card,
-    height: 50,
-    borderRadius: 10,
-    paddingHorizontal: 15,
-    marginBottom: 15,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    color: COLORS.text,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
+  // Input
+  inputField: { backgroundColor: COLORS.card, height: 50, borderRadius: 10, paddingHorizontal: 15, marginBottom: 15, borderWidth: 1, borderColor: COLORS.border, color: COLORS.text, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
 
   // Dropdown modal
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
-  dropdownSheet: {
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 20,
-    paddingBottom: 36,
-  },
+  dropdownSheet: { backgroundColor: COLORS.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 36 },
   dropdownTitle: { fontSize: 17, fontWeight: '700', color: COLORS.text, marginBottom: 16 },
-  dropdownItem: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    marginBottom: 4,
-  },
+  dropdownItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 12, borderRadius: 10, marginBottom: 4 },
   dropdownItemText: { fontSize: 15, color: COLORS.text },
 
   // Body part chips
   bodyPartScroll: { flexGrow: 0, marginBottom: 4 },
-  bodyPartChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.white,
-  },
+  bodyPartChip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, borderColor: COLORS.border, backgroundColor: COLORS.white },
   bodyPartChipActive: { backgroundColor: COLORS.accent, borderColor: COLORS.accent },
   bodyPartChipText: { fontSize: 13, color: COLORS.subtext, fontWeight: '500' },
   bodyPartChipTextActive: { color: COLORS.white },
-  addBodyPartChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1.5,
-    borderColor: COLORS.primary,
-    backgroundColor: COLORS.white,
-  },
+  addBodyPartChip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, borderColor: COLORS.primary, backgroundColor: COLORS.white },
   addBodyPartText: { fontSize: 13, color: COLORS.primary, fontWeight: '600' },
 
-  // Upload mode toggle
+  // Upload
   uploadModeRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
-  modePill: {
-    flex: 1,
-    height: 44,
-    borderRadius: 10,
-    borderWidth: 1.5,
-    borderColor: COLORS.border,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: COLORS.bg,
-  },
+  modePill: { flex: 1, height: 44, borderRadius: 10, borderWidth: 1.5, borderColor: COLORS.border, justifyContent: 'center', alignItems: 'center', backgroundColor: COLORS.bg },
   modePillActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
   modePillText: { fontSize: 14, color: COLORS.subtext, fontWeight: '500' },
   modePillTextActive: { color: COLORS.white, fontWeight: '600' },
-
-  // Camera / Image
-  cameraPlaceholder: {
-    width: '100%',
-    height: 200,
-    backgroundColor: '#EFEFEF',
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginVertical: 10,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: COLORS.border,
-    borderStyle: 'dashed',
-  },
+  cameraPlaceholder: { width: '100%', height: 200, backgroundColor: '#EFEFEF', borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginVertical: 10, overflow: 'hidden', borderWidth: 2, borderColor: COLORS.border, borderStyle: 'dashed' },
   cameraControls: { position: 'absolute', top: 10, right: 10, gap: 8, zIndex: 10 },
   cameraControlBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
-  cameraControlBtnActive: { backgroundColor: 'rgba(255,210,0,0.75)' },
   cameraControlText: { fontSize: 16 },
-  mockImageSquare: { width: '48%', height: 120, backgroundColor: COLORS.bg, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, justifyContent: 'center', alignItems: 'center' },
   clearImageBtn: { backgroundColor: COLORS.border, height: 40, borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginTop: 6 },
   clearImageBtnText: { color: COLORS.subtext, fontWeight: '500', fontSize: 13 },
 
@@ -1054,7 +1036,7 @@ const styles = StyleSheet.create({
   customTabText: { color: COLORS.subtext, fontWeight: '600', fontSize: 14 },
   customTabTextActive: { color: COLORS.text },
 
-  // Bottom nav
+  // Tab bar
   tabBar: { height: 70, backgroundColor: 'transparent', flexDirection: 'row', paddingBottom: 10 },
   tabItem: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   tabIcon: { width: 24, height: 24, resizeMode: 'contain', marginBottom: 4 },
@@ -1074,14 +1056,11 @@ const styles = StyleSheet.create({
   warningText: { color: COLORS.riskHigh, fontSize: 13, fontWeight: '500', textAlign: 'center' },
   settingRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: COLORS.border },
 
-  // Landing / Input
+  // Landing
   logoArea: { flex: 2, justifyContent: 'center', alignItems: 'center' },
   appLogo: { width: 200, height: 200 },
   bottomHero: { flex: 1, padding: 40, alignItems: 'center' },
   welcomeTitle: { fontSize: 24, fontWeight: 'bold', marginBottom: 30, color: COLORS.text },
-  formContent: { flex: 1, padding: 30, justifyContent: 'center' },
-  screenHeader: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 10, color: COLORS.text },
-  inputLabel: { textAlign: 'center', color: COLORS.subtext, marginBottom: 30 },
 
   // Home
   scoreCard: { backgroundColor: COLORS.card, borderRadius: 20, padding: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: COLORS.border, marginBottom: 20 },
@@ -1089,7 +1068,6 @@ const styles = StyleSheet.create({
   scoreNum: { fontSize: 20, fontWeight: 'bold' },
   scoreTotal: { fontSize: 10, color: COLORS.subtext },
   scoreLabel: { fontSize: 8, color: COLORS.subtext },
-  changeText: { color: COLORS.text, fontSize: 15 },
   tipRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: COLORS.border },
   tipBullet: { color: COLORS.primary, fontSize: 18, marginRight: 12 },
   tipText: { color: COLORS.text, flex: 1 },
@@ -1097,11 +1075,35 @@ const styles = StyleSheet.create({
   emptyStateTitle: { fontSize: 20, fontWeight: 'bold', color: COLORS.text, marginBottom: 12 },
   emptyStateText: { fontSize: 14, color: COLORS.subtext, textAlign: 'center', lineHeight: 22 },
 
+  // Profile screen
+  profileHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 5 },
+  addProfileBtn: { borderWidth: 1.5, borderColor: COLORS.primary, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 7 },
+  addProfileBtnText: { color: COLORS.primary, fontWeight: '600', fontSize: 13 },
+  profileCard: { backgroundColor: COLORS.card, borderRadius: 16, borderWidth: 1, borderColor: COLORS.border, padding: 16, marginBottom: 12 },
+  profileCardActive: { borderColor: COLORS.primary, borderWidth: 2 },
+  profileCardRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  profileIconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: COLORS.secondary, justifyContent: 'center', alignItems: 'center' },
+  profileIconText: { fontSize: 20 },
+  profileName: { fontSize: 16, fontWeight: 'bold', color: COLORS.text, marginBottom: 6 },
+  profileStats: { flexDirection: 'row', gap: 20 },
+  profileStat: {},
+  profileStatLabel: { fontSize: 11, color: COLORS.subtext, marginBottom: 2 },
+  profileStatValue: { fontSize: 13, fontWeight: '600', color: COLORS.text },
+  profileMenuBtn: { padding: 4 },
+  profileMenuIcon: { fontSize: 22, color: COLORS.subtext, lineHeight: 28 },
 
-  // Profile
-  statLine: { paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: COLORS.border, flexDirection: 'row', justifyContent: 'space-between' },
-  statLabel: { color: COLORS.subtext, fontSize: 16 },
-  statVal: { fontSize: 16, fontWeight: '500', color: COLORS.text },
+  // History
+  historyBtn: { borderWidth: 1.5, borderColor: COLORS.primary, borderRadius: 12, height: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
+  historyBtnText: { color: COLORS.primary, fontWeight: '600', fontSize: 14 },
+  areaTag: { borderWidth: 1, borderColor: COLORS.border, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, marginTop: 6 },
+  areaTagText: { color: COLORS.text, fontSize: 14, fontWeight: '500' },
+  historyCard: { backgroundColor: COLORS.card, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: COLORS.border, marginBottom: 12 },
+  historyCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  historyCardDate: { fontSize: 16, fontWeight: 'bold', color: COLORS.text },
+  historyCardMetrics: { flexDirection: 'row', justifyContent: 'space-between' },
+  historyMetric: { alignItems: 'center' },
+  historyMetricLabel: { fontSize: 11, color: COLORS.subtext, marginBottom: 4 },
+  historyMetricValue: { fontSize: 14, fontWeight: 'bold', color: COLORS.text },
 });
 
 export default PixelDermApp;

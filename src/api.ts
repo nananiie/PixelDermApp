@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://192.168.0.107:3000';
+const BASE_URL = 'http://192.168.50.157:3000';
 
 const USER_ID_KEY = '@pixelderm_user_id';
 
@@ -19,6 +19,18 @@ async function storageSet(key: string, value: string): Promise<void> {
 // ---------------------------------------------------------------------------
 // User
 // ---------------------------------------------------------------------------
+
+export async function createNewUser(): Promise<string> {
+  const deviceId = `device-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const res = await fetch(`${BASE_URL}/api/users`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceIdentifier: deviceId, deviceType: 'android' }),
+  });
+  if (!res.ok) throw new Error('Failed to create user');
+  const data = await res.json();
+  return data.userId ?? data.user_id ?? data.id;
+}
 
 export async function getOrCreateUserId(): Promise<string> {
   const stored = (await storageGet(USER_ID_KEY)) ?? _memoryUserId;
