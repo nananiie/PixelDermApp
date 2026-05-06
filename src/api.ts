@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://192.168.50.157:3000';
+const BASE_URL = 'http://172.20.10.6:3000'; 
 
 const USER_ID_KEY = '@pixelderm_user_id';
 
@@ -67,6 +67,8 @@ export type AnalyzeResult = {
   features: { spotCount: number; textureScore: number; pigmentation: number };
   baseline: { spotCount: number; textureScore: number; pigmentation: number } | null;
   recommendation: { status: string; advice: string; recommendationId: string };
+  uvDamage?: { damageScore: number; level: string; advice: string };
+  geminiRecommendation?: string;
 };
 
 export async function analyzeImage(

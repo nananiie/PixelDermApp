@@ -134,6 +134,8 @@ const PixelDermApp = () => {
   const [analysisTab, setAnalysisTab] = useState('results');
   // Upload flow
   const [selectedImage, setSelectedImage] = useState(null);
+  const [capturedImageUri, setCapturedImageUri] = useState<string | null>(null);
+  const [showConsistencyModal, setShowConsistencyModal] = useState(false);
   const [progress, setProgress] = useState(0);
   const progressRef = useRef(0);
   const [uploadMode, setUploadMode] = useState(null);
@@ -174,6 +176,8 @@ const PixelDermApp = () => {
   useEffect(() => {
     if (currentScreen !== 'upload') {
       setSelectedImage(null);
+      setCapturedImageUri(null);
+      setShowConsistencyModal(false);
       setUploadMode(null);
       setCameraPosition('back');
     }
@@ -215,40 +219,7 @@ const PixelDermApp = () => {
   }, [activeProfileId]);
 
   // --- HANDLERS ---
-  const handleCapture = async () => {
-    let imageUri: string | undefined;
-
-    if (uploadMode === 'camera') {
-      try {
-        const photo = await photoOutput.capturePhoto({ enableShutterSound: false }, {});
-        const rawPath = await photo.saveToTemporaryFileAsync();
-        imageUri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
-        photo.dispose();
-      } catch (e: any) {
-        Alert.alert('Camera Error', e.message ?? 'Failed to take photo');
-        return;
-      }
-    } else {
-      imageUri = (selectedImage as any)?.uri;
-    }
-
-    if (!imageUri) {
-      Alert.alert('No Image', 'Please select or capture an image first.');
-      return;
-    }
-
-    const confirmed = await new Promise<boolean>(resolve =>
-      Alert.alert(
-        'Before You Scan',
-        'Consistency in uploading images is encouraged to ensure accurate results.\n\nTry to scan the same area under similar lighting and distance each time.',
-        [
-          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-          { text: 'Continue', onPress: () => resolve(true) },
-        ]
-      )
-    );
-    if (!confirmed) return;
-
+  const handleAnalyze = async (imageUri: string) => {
     progressRef.current = 0;
     setProgress(0);
     setCurrentScreen('processing');
@@ -286,6 +257,39 @@ const PixelDermApp = () => {
         setTimeout(() => setCurrentScreen('analysis'), 400);
       }
     }
+  };
+
+  const handleTakePhoto = async () => {
+    try {
+      const photo = await photoOutput.capturePhoto({ enableShutterSound: false }, {});
+      const rawPath = await photo.saveToTemporaryFileAsync();
+      const uri = rawPath.startsWith('file://') ? rawPath : `file://${rawPath}`;
+      photo.dispose();
+      setCapturedImageUri(uri);
+      setShowConsistencyModal(true);
+    } catch (e: any) {
+      Alert.alert('Camera Error', e.message ?? 'Failed to take photo');
+    }
+  };
+
+  const handleCapture = async () => {
+    const imageUri = (selectedImage as any)?.uri;
+    if (!imageUri) {
+      Alert.alert('No Image', 'Please select or capture an image first.');
+      return;
+    }
+    const confirmed = await new Promise<boolean>(resolve =>
+      Alert.alert(
+        'Before You Scan',
+        'Consistency in uploading images is encouraged to ensure accurate results.\n\nTry to scan the same area under similar lighting and distance each time.',
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Continue', onPress: () => resolve(true) },
+        ]
+      )
+    );
+    if (!confirmed) return;
+    await handleAnalyze(imageUri);
   };
 
   const handlePickFromGallery = () => {
@@ -448,14 +452,29 @@ const PixelDermApp = () => {
                     <Text style={styles.scoreLabel}>Skin Score</Text>
                   </View>
                 </View>
-                <Text style={styles.sectionHeader}>Tips</Text>
-                <View style={styles.cardBlock}>
-                  {lastAnalysis.recommendation.advice.split(/\.\s+/).filter(Boolean).map((tip, i) => (
-                    <View key={i} style={styles.tipRow}>
-                      <Text style={styles.tipBullet}>•</Text>
-                      <Text style={styles.tipText}>{tip}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={styles.sectionHeader}>Tips</Text>
+                  {lastAnalysis.geminiRecommendation && (
+                    <View style={{ backgroundColor: COLORS.accent, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2, marginTop: 2 }}>
+                      <Text style={{ color: COLORS.white, fontSize: 10, fontWeight: '700' }}>AI</Text>
                     </View>
-                  ))}
+                  )}
+                </View>
+                <View style={styles.cardBlock}>
+                  {lastAnalysis.geminiRecommendation
+                    ? lastAnalysis.geminiRecommendation.split(/\.\s+/).filter(Boolean).map((tip, i) => (
+                        <View key={i} style={styles.tipRow}>
+                          <Text style={styles.tipBullet}>•</Text>
+                          <Text style={styles.tipText}>{tip}</Text>
+                        </View>
+                      ))
+                    : lastAnalysis.recommendation.advice.split(/\.\s+/).filter(Boolean).map((tip, i) => (
+                        <View key={i} style={styles.tipRow}>
+                          <Text style={styles.tipBullet}>•</Text>
+                          <Text style={styles.tipText}>{tip}</Text>
+                        </View>
+                      ))
+                  }
                 </View>
                 <TouchableOpacity style={styles.historyBtn} onPress={() => setCurrentScreen('history')}>
                   <Text style={styles.historyBtnText}>View History</Text>
@@ -596,6 +615,8 @@ const PixelDermApp = () => {
                     <Text style={{ color: COLORS.subtext }}>Requesting camera permission…</Text>
                   ) : device == null ? (
                     <ActivityIndicator size="large" color={COLORS.primary} />
+                  ) : capturedImageUri ? (
+                    <Image source={{ uri: capturedImageUri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
                   ) : (
                     <>
                       <Camera
@@ -618,9 +639,14 @@ const PixelDermApp = () => {
               )}
             </View>
             <Text style={styles.centerSubtext}>JPG or PNG (max. 5MB)</Text>
-            {uploadMode === 'camera' && (
-              <TouchableOpacity style={styles.btnFull} onPress={handleCapture}>
+            {uploadMode === 'camera' && !capturedImageUri && (
+              <TouchableOpacity style={styles.btnFull} onPress={handleTakePhoto}>
                 <Text style={styles.btnText}>Take Photo</Text>
+              </TouchableOpacity>
+            )}
+            {uploadMode === 'camera' && capturedImageUri && (
+              <TouchableOpacity style={[styles.clearImageBtn, { marginTop: 10 }]} onPress={() => setCapturedImageUri(null)}>
+                <Text style={styles.clearImageBtnText}>Retake Photo</Text>
               </TouchableOpacity>
             )}
             {uploadMode === 'gallery' && selectedImage && (
@@ -675,7 +701,7 @@ const PixelDermApp = () => {
   const renderAnalysis = () => {
     const analysisResult = activeProfile?.lastAnalysis;
     if (!analysisResult) return null;
-    const { features, baseline, recommendation, analysis } = analysisResult;
+    const { features, baseline, recommendation, analysis, geminiRecommendation } = analysisResult;
     const skinScore = computeSkinScore(features);
     const riskInfo = skinScoreRisk(skinScore);
     const pigmentPct = (features.pigmentation * 100).toFixed(1);
@@ -743,6 +769,17 @@ const PixelDermApp = () => {
                     </View>
                   )}
                 </View>
+                {geminiRecommendation && (
+                  <View style={[styles.outlinedCard, { borderColor: COLORS.accent, borderWidth: 1.5 }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 6 }}>
+                      <Text style={[styles.cardTitle, { marginBottom: 0 }]}>AI Recommendation</Text>
+                      <View style={{ backgroundColor: COLORS.accent, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
+                        <Text style={{ color: COLORS.white, fontSize: 10, fontWeight: '700' }}>Groq AI</Text>
+                      </View>
+                    </View>
+                    <Text style={[styles.textSmall, { lineHeight: 20 }]}>{geminiRecommendation}</Text>
+                  </View>
+                )}
               </>
             ) : (
               <>
@@ -937,6 +974,33 @@ const PixelDermApp = () => {
       {currentScreen === 'analysis' && renderAnalysis()}
       {currentScreen === 'history' && renderHistory()}
       {currentScreen === 'settings' && renderSettings()}
+
+      {/* Consistency reminder — shown after camera capture preview */}
+      <Modal visible={showConsistencyModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.dropdownSheet, { paddingBottom: 30 }]}>
+            <Text style={styles.dropdownTitle}>Before You Scan</Text>
+            <Text style={[styles.textSmall, { lineHeight: 22, marginBottom: 20 }]}>
+              Consistency in uploading images is encouraged to ensure accurate results.{'\n\n'}Try to scan the same area under similar lighting and distance each time.
+            </Text>
+            <TouchableOpacity
+              style={styles.btnFull}
+              onPress={() => {
+                setShowConsistencyModal(false);
+                if (capturedImageUri) handleAnalyze(capturedImageUri);
+              }}
+            >
+              <Text style={styles.btnText}>OK, Analyze</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.clearImageBtn, { marginTop: 8 }]}
+              onPress={() => { setShowConsistencyModal(false); setCapturedImageUri(null); }}
+            >
+              <Text style={styles.clearImageBtnText}>Retake Photo</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Profile Add/Edit Modal — global, renders over any screen */}
       <Modal visible={showProfileModal} transparent animationType="slide">
