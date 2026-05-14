@@ -1,6 +1,14 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const BASE_URL = 'http://172.20.10.6:3000'; 
+export const BASE_URL = 'https://longitudinalskinanalysissystem-production.up.railway.app';
+
+const TIMEOUT_MS = 15000;
+
+function fetchWithTimeout(input: RequestInfo, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(id));
+}
 
 const USER_ID_KEY = '@pixelderm_user_id';
 
@@ -20,16 +28,25 @@ async function storageSet(key: string, value: string): Promise<void> {
 // User
 // ---------------------------------------------------------------------------
 
-export async function createNewUser(): Promise<string> {
+export async function createNewUser(displayName?: string): Promise<string> {
   const deviceId = `device-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const res = await fetch(`${BASE_URL}/api/users`, {
+  const res = await fetchWithTimeout(`${BASE_URL}/api/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ deviceIdentifier: deviceId, deviceType: 'android' }),
+    body: JSON.stringify({ deviceIdentifier: deviceId, deviceType: 'android', name: displayName }),
   });
   if (!res.ok) throw new Error('Failed to create user');
   const data = await res.json();
   return data.userId ?? data.user_id ?? data.id;
+}
+
+export async function updateUserName(userId: string, name: string): Promise<void> {
+  const res = await fetchWithTimeout(`${BASE_URL}/api/users/${userId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error('Failed to update user name');
 }
 
 export async function getOrCreateUserId(): Promise<string> {
@@ -37,7 +54,7 @@ export async function getOrCreateUserId(): Promise<string> {
   if (stored) return stored;
 
   const deviceId = `device-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const res = await fetch(`${BASE_URL}/api/users`, {
+  const res = await fetchWithTimeout(`${BASE_URL}/api/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceIdentifier: deviceId, deviceType: 'android' }),
@@ -52,7 +69,7 @@ export async function getOrCreateUserId(): Promise<string> {
 }
 
 export async function getUserStats(userId: string) {
-  const res = await fetch(`${BASE_URL}/api/users/${userId}`);
+  const res = await fetchWithTimeout(`${BASE_URL}/api/users/${userId}`);
   if (!res.ok) throw new Error('Failed to fetch user stats');
   return res.json();
 }
@@ -67,14 +84,24 @@ export type AnalyzeResult = {
   features: { spotCount: number; textureScore: number; pigmentation: number };
   baseline: { spotCount: number; textureScore: number; pigmentation: number } | null;
   recommendation: { status: string; advice: string; recommendationId: string };
+  currentImageUrl?: string;
+  previousImageUrl?: string | null;
   uvDamage?: { damageScore: number; level: string; advice: string };
   geminiRecommendation?: string;
+};
+
+export type SunProfile = {
+  sunExposure?: string;
+  sunscreenUse?: string;
+  outdoorFrequency?: string;
+  lastSunburn?: string;
 };
 
 export async function analyzeImage(
   imageUri: string,
   userId: string,
   bodyArea: string,
+  sunProfile?: SunProfile,
 ): Promise<AnalyzeResult> {
   const form = new FormData();
   form.append('userId', userId);
@@ -85,7 +112,12 @@ export async function analyzeImage(
     type: 'image/jpeg',
   } as any);
 
-  const res = await fetch(`${BASE_URL}/api/analyze/upload`, {
+  if (sunProfile?.sunExposure) form.append('sunExposure', sunProfile.sunExposure);
+  if (sunProfile?.sunscreenUse) form.append('sunscreenUse', sunProfile.sunscreenUse);
+  if (sunProfile?.outdoorFrequency) form.append('outdoorFrequency', sunProfile.outdoorFrequency);
+  if (sunProfile?.lastSunburn) form.append('lastSunburn', sunProfile.lastSunburn);
+
+  const res = await fetchWithTimeout(`${BASE_URL}/api/analyze/upload`, {
     method: 'POST',
     body: form,
     // Do NOT set Content-Type manually — fetch sets multipart boundary automatically
@@ -103,7 +135,7 @@ export async function analyzeImage(
 // ---------------------------------------------------------------------------
 
 export async function getComparison(userId: string, bodyArea: string) {
-  const res = await fetch(`${BASE_URL}/api/comparison/${userId}/${bodyArea.toLowerCase()}`);
+  const res = await fetchWithTimeout(`${BASE_URL}/api/comparison/${userId}/${bodyArea.toLowerCase()}`);
   if (!res.ok) throw new Error('Failed to fetch comparison');
   return res.json();
 }
@@ -113,7 +145,7 @@ export async function getComparison(userId: string, bodyArea: string) {
 // ---------------------------------------------------------------------------
 
 export async function getTrends(userId: string, bodyArea: string, days = 90) {
-  const res = await fetch(`${BASE_URL}/api/trends/${userId}/${bodyArea.toLowerCase()}?days=${days}`);
+  const res = await fetchWithTimeout(`${BASE_URL}/api/trends/${userId}/${bodyArea.toLowerCase()}?days=${days}`);
   if (!res.ok) throw new Error('Failed to fetch trends');
   return res.json();
 }
@@ -123,13 +155,13 @@ export async function getTrends(userId: string, bodyArea: string, days = 90) {
 // ---------------------------------------------------------------------------
 
 export async function getRecommendations(userId: string) {
-  const res = await fetch(`${BASE_URL}/api/recommendations/${userId}`);
+  const res = await fetchWithTimeout(`${BASE_URL}/api/recommendations/${userId}`);
   if (!res.ok) throw new Error('Failed to fetch recommendations');
   return res.json();
 }
 
 export async function markRecommendationViewed(recommendationId: string) {
-  const res = await fetch(`${BASE_URL}/api/recommendations/${recommendationId}/viewed`, {
+  const res = await fetchWithTimeout(`${BASE_URL}/api/recommendations/${recommendationId}/viewed`, {
     method: 'PUT',
   });
   if (!res.ok) throw new Error('Failed to mark recommendation');
@@ -142,7 +174,7 @@ export async function markRecommendationViewed(recommendationId: string) {
 
 export async function checkHealth(): Promise<boolean> {
   try {
-    const res = await fetch(`${BASE_URL}/health`);
+    const res = await fetchWithTimeout(`${BASE_URL}/health`);
     return res.ok;
   } catch {
     return false;

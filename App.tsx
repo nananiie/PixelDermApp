@@ -13,11 +13,13 @@ import {
   Alert,
   Modal,
   FlatList,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
 import * as ImagePicker from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createNewUser, analyzeImage, type AnalyzeResult } from './src/api';
+import { createNewUser, analyzeImage, updateUserName, BASE_URL, type AnalyzeResult } from './src/api';
 
 // --- TYPES ---
 type Profile = {
@@ -26,6 +28,10 @@ type Profile = {
   age: string;
   sex: string;
   skinType: string;
+  sunExposure: string;
+  sunscreenUse: string;
+  outdoorFrequency: string;
+  lastSunburn: string;
   userId: string | null;
   monitoredParts: string[];
   activePart: string;
@@ -112,6 +118,11 @@ const AVAILABLE_BODY_PARTS = [
   'Chest', 'Back', 'Abdomen', 'Left Leg', 'Right Leg', 'Left Foot', 'Right Foot',
 ];
 
+const SUN_EXPOSURE_OPTIONS = ['Less than 30 minutes', 'Less than an hour', 'More than an hour'];
+const SUNSCREEN_USE_OPTIONS = ['None', 'Once a day', 'Twice a day', 'More than 3 times a day'];
+const OUTDOOR_FREQUENCY_OPTIONS = ['1 day a week', '2 days a week', '3 days a week', '4 days a week', '5 days a week', '6 days a week', 'Every day'];
+const LAST_SUNBURN_OPTIONS = ['None', 'A week ago', 'More than months ago'];
+
 const computeSkinScore = (features: { spotCount: number; textureScore: number; pigmentation: number }) =>
   Math.min(100, Math.round(
     (
@@ -153,6 +164,10 @@ const PixelDermApp = () => {
   const [formAge, setFormAge] = useState('');
   const [formSex, setFormSex] = useState('');
   const [formSkinType, setFormSkinType] = useState('');
+  const [formSunExposure, setFormSunExposure] = useState('');
+  const [formSunscreenUse, setFormSunscreenUse] = useState('');
+  const [formOutdoorFrequency, setFormOutdoorFrequency] = useState('');
+  const [formLastSunburn, setFormLastSunburn] = useState('');
 
   // Camera
   const { hasPermission, requestPermission } = useCameraPermission();
@@ -234,10 +249,15 @@ const PixelDermApp = () => {
     try {
       let uid = activeProfile?.userId ?? null;
       if (!uid) {
-        uid = await createNewUser();
+        uid = await createNewUser(activeProfile?.name);
         updateActiveProfile({ userId: uid });
       }
-      const result = await analyzeImage(imageUri, uid, activeProfile?.activePart ?? 'Face');
+      const result = await analyzeImage(imageUri, uid, activeProfile?.activePart ?? 'Face', {
+        sunExposure: activeProfile?.sunExposure,
+        sunscreenUse: activeProfile?.sunscreenUse,
+        outdoorFrequency: activeProfile?.outdoorFrequency,
+        lastSunburn: activeProfile?.lastSunburn,
+      });
       const part = activeProfile?.activePart ?? 'Face';
       const prevHistory = activeProfile?.scanHistory ?? {};
       updateActiveProfile({
@@ -318,6 +338,7 @@ const PixelDermApp = () => {
   const handleAddProfile = () => {
     setEditingProfile(null);
     setFormName(''); setFormAge(''); setFormSex(''); setFormSkinType('');
+    setFormSunExposure(''); setFormSunscreenUse(''); setFormOutdoorFrequency(''); setFormLastSunburn('');
     setShowProfileModal(true);
   };
 
@@ -325,6 +346,10 @@ const PixelDermApp = () => {
     setEditingProfile(profile);
     setFormName(profile.name); setFormAge(profile.age);
     setFormSex(profile.sex); setFormSkinType(profile.skinType);
+    setFormSunExposure(profile.sunExposure ?? '');
+    setFormSunscreenUse(profile.sunscreenUse ?? '');
+    setFormOutdoorFrequency(profile.outdoorFrequency ?? '');
+    setFormLastSunburn(profile.lastSunburn ?? '');
     setShowProfileModal(true);
   };
 
@@ -362,14 +387,21 @@ const PixelDermApp = () => {
     if (editingProfile) {
       setProfiles(prev => prev.map(p =>
         p.id === editingProfile.id
-          ? { ...p, name: formName.trim(), age: formAge, sex: formSex, skinType: formSkinType }
+          ? { ...p, name: formName.trim(), age: formAge, sex: formSex, skinType: formSkinType,
+              sunExposure: formSunExposure, sunscreenUse: formSunscreenUse,
+              outdoorFrequency: formOutdoorFrequency, lastSunburn: formLastSunburn }
           : p
       ));
+      if (editingProfile.userId) {
+        updateUserName(editingProfile.userId, formName.trim()).catch(() => {});
+      }
     } else {
       const isFirst = profiles.length === 0;
       const newProfile: Profile = {
         id: `profile-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         name: formName.trim(), age: formAge, sex: formSex, skinType: formSkinType,
+        sunExposure: formSunExposure, sunscreenUse: formSunscreenUse,
+        outdoorFrequency: formOutdoorFrequency, lastSunburn: formLastSunburn,
         userId: null, monitoredParts: ['Face'], activePart: 'Face', lastAnalysis: null, scanHistory: {},
       };
       setProfiles(prev => [...prev, newProfile]);
@@ -476,6 +508,7 @@ const PixelDermApp = () => {
                       ))
                   }
                 </View>
+                <Text style={styles.disclaimerText}>Recommendations are validated by dermatologists.</Text>
                 <TouchableOpacity style={styles.historyBtn} onPress={() => setCurrentScreen('history')}>
                   <Text style={styles.historyBtnText}>View History</Text>
                 </TouchableOpacity>
@@ -561,6 +594,30 @@ const PixelDermApp = () => {
                       <Text style={styles.profileStatValue}>{profile.age || '—'}</Text>
                     </View>
                   </View>
+                  {(profile.sunExposure || profile.sunscreenUse || profile.outdoorFrequency || profile.lastSunburn) && (
+                    <View style={[styles.profileStats, { marginTop: 8, flexWrap: 'wrap', gap: 8 }]}>
+                      {profile.sunExposure ? (
+                        <View style={styles.profileSunTag}>
+                          <Text style={styles.profileSunTagText}>☀ {profile.sunExposure}</Text>
+                        </View>
+                      ) : null}
+                      {profile.sunscreenUse ? (
+                        <View style={styles.profileSunTag}>
+                          <Text style={styles.profileSunTagText}>🧴 {profile.sunscreenUse}</Text>
+                        </View>
+                      ) : null}
+                      {profile.outdoorFrequency ? (
+                        <View style={styles.profileSunTag}>
+                          <Text style={styles.profileSunTagText}>🚶 {profile.outdoorFrequency}</Text>
+                        </View>
+                      ) : null}
+                      {profile.lastSunburn ? (
+                        <View style={styles.profileSunTag}>
+                          <Text style={styles.profileSunTagText}>🔴 Sunburn: {profile.lastSunburn}</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  )}
                 </View>
                 <TouchableOpacity
                   style={styles.profileMenuBtn}
@@ -713,6 +770,8 @@ const PixelDermApp = () => {
     const pigmentDelta = baseline ? ((features.pigmentation - baseline.pigmentation) * 100).toFixed(1) : null;
     const fmt = (n: number | null, unit = '') => n === null ? '—' : `${n > 0 ? '+' : ''}${n}${unit}`;
     const activePart = activeProfile?.activePart ?? 'Face';
+    const currentImageUrl = analysisResult.currentImageUrl ? `${BASE_URL}${analysisResult.currentImageUrl}` : null;
+    const previousImageUrl = analysisResult.previousImageUrl ? `${BASE_URL}${analysisResult.previousImageUrl}` : null;
 
     return (
       <View style={styles.fullScreen}>
@@ -771,18 +830,49 @@ const PixelDermApp = () => {
                 </View>
                 {geminiRecommendation && (
                   <View style={[styles.outlinedCard, { borderColor: COLORS.accent, borderWidth: 1.5 }]}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 6 }}>
-                      <Text style={[styles.cardTitle, { marginBottom: 0 }]}>AI Recommendation</Text>
-                      <View style={{ backgroundColor: COLORS.accent, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
-                        <Text style={{ color: COLORS.white, fontSize: 10, fontWeight: '700' }}>Groq AI</Text>
-                      </View>
-                    </View>
+                    <Text style={styles.cardTitle}>AI Recommendation</Text>
                     <Text style={[styles.textSmall, { lineHeight: 20 }]}>{geminiRecommendation}</Text>
                   </View>
                 )}
+                <Text style={styles.disclaimerText}>Recommendations are validated by dermatologists.</Text>
               </>
             ) : (
               <>
+                {(currentImageUrl || previousImageUrl) && (
+                  <View style={styles.outlinedCard}>
+                    <Text style={styles.cardTitle}>Image Comparison</Text>
+                    <View style={{ flexDirection: 'row', gap: 10 }}>
+                      <View style={{ flex: 1, alignItems: 'center' }}>
+                        <Text style={[styles.subtext, { marginBottom: 6, fontSize: 11 }]}>Previous</Text>
+                        {previousImageUrl ? (
+                          <Image
+                            source={{ uri: previousImageUrl }}
+                            style={{ width: '100%', aspectRatio: 1, borderRadius: 8, backgroundColor: COLORS.border }}
+                            resizeMode="cover"
+                          />
+                        ) : (
+                          <View style={{ width: '100%', aspectRatio: 1, borderRadius: 8, backgroundColor: COLORS.border, justifyContent: 'center', alignItems: 'center' }}>
+                            <Text style={[styles.subtext, { fontSize: 11, textAlign: 'center' }]}>No previous{'\n'}scan</Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={{ flex: 1, alignItems: 'center' }}>
+                        <Text style={[styles.subtext, { marginBottom: 6, fontSize: 11 }]}>Current</Text>
+                        {currentImageUrl ? (
+                          <Image
+                            source={{ uri: currentImageUrl }}
+                            style={{ width: '100%', aspectRatio: 1, borderRadius: 8, backgroundColor: COLORS.border }}
+                            resizeMode="cover"
+                          />
+                        ) : (
+                          <View style={{ width: '100%', aspectRatio: 1, borderRadius: 8, backgroundColor: COLORS.border, justifyContent: 'center', alignItems: 'center' }}>
+                            <Text style={[styles.subtext, { fontSize: 11 }]}>Unavailable</Text>
+                          </View>
+                        )}
+                      </View>
+                    </View>
+                  </View>
+                )}
                 {baseline ? (
                   <>
                     <View style={styles.outlinedCard}>
@@ -1004,32 +1094,41 @@ const PixelDermApp = () => {
 
       {/* Profile Add/Edit Modal — global, renders over any screen */}
       <Modal visible={showProfileModal} transparent animationType="slide">
-        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowProfileModal(false)}>
-          <View style={[styles.dropdownSheet, { paddingBottom: 40 }]}>
-            <Text style={styles.dropdownTitle}>{editingProfile ? 'Edit Profile' : 'Add Profile'}</Text>
-            <TextInput
-              style={styles.inputField}
-              placeholder="Name / Nickname"
-              placeholderTextColor="#AAAAAA"
-              value={formName}
-              onChangeText={setFormName}
-            />
-            <TextInput
-              style={styles.inputField}
-              placeholder="Age"
-              placeholderTextColor="#AAAAAA"
-              keyboardType="number-pad"
-              value={formAge}
-              onChangeText={t => setFormAge(t.replace(/[^0-9]/g, ''))}
-              maxLength={3}
-            />
-            <DropdownField placeholder="Sex" value={formSex} options={['Male', 'Female', 'Rather not say']} onSelect={setFormSex} />
-            <DropdownField placeholder="Skin Type" value={formSkinType} options={['Dry', 'Oily', 'Normal', 'Sensitive']} onSelect={setFormSkinType} />
-            <TouchableOpacity style={[styles.btnFull, { marginTop: 20 }]} onPress={handleSaveProfile}>
-              <Text style={styles.btnText}>{editingProfile ? 'Save Changes' : 'Add Profile'}</Text>
-            </TouchableOpacity>
-          </View>
-        </TouchableOpacity>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+          <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowProfileModal(false)}>
+            <View style={[styles.dropdownSheet, { paddingBottom: 40, maxHeight: '90%' }]}>
+              <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+                <Text style={styles.dropdownTitle}>{editingProfile ? 'Edit Profile' : 'Add Profile'}</Text>
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Name / Nickname"
+                  placeholderTextColor="#AAAAAA"
+                  value={formName}
+                  onChangeText={setFormName}
+                />
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="Age"
+                  placeholderTextColor="#AAAAAA"
+                  keyboardType="number-pad"
+                  value={formAge}
+                  onChangeText={t => setFormAge(t.replace(/[^0-9]/g, ''))}
+                  maxLength={3}
+                />
+                <DropdownField placeholder="Sex" value={formSex} options={['Male', 'Female', 'Rather not say']} onSelect={setFormSex} />
+                <DropdownField placeholder="Skin Type" value={formSkinType} options={['Dry', 'Oily', 'Normal', 'Sensitive']} onSelect={setFormSkinType} />
+                <Text style={[styles.dropdownTitle, { fontSize: 14, marginTop: 8, marginBottom: 4 }]}>Sun &amp; Lifestyle</Text>
+                <DropdownField placeholder="Daily sun exposure duration" value={formSunExposure} options={SUN_EXPOSURE_OPTIONS} onSelect={setFormSunExposure} />
+                <DropdownField placeholder="Sunscreen use" value={formSunscreenUse} options={SUNSCREEN_USE_OPTIONS} onSelect={setFormSunscreenUse} />
+                <DropdownField placeholder="How many times a week do you go out?" value={formOutdoorFrequency} options={OUTDOOR_FREQUENCY_OPTIONS} onSelect={setFormOutdoorFrequency} />
+                <DropdownField placeholder="Last time you had sunburn" value={formLastSunburn} options={LAST_SUNBURN_OPTIONS} onSelect={setFormLastSunburn} />
+                <TouchableOpacity style={[styles.btnFull, { marginTop: 20 }]} onPress={handleSaveProfile}>
+                  <Text style={styles.btnText}>{editingProfile ? 'Save Changes' : 'Add Profile'}</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
+          </TouchableOpacity>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -1135,6 +1234,7 @@ const styles = StyleSheet.create({
   tipRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: COLORS.border },
   tipBullet: { color: COLORS.primary, fontSize: 18, marginRight: 12 },
   tipText: { color: COLORS.text, flex: 1 },
+  disclaimerText: { color: COLORS.subtext, fontSize: 11, textAlign: 'center', marginBottom: 16, fontStyle: 'italic' },
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingTop: 60 },
   emptyStateTitle: { fontSize: 20, fontWeight: 'bold', color: COLORS.text, marginBottom: 12 },
   emptyStateText: { fontSize: 14, color: COLORS.subtext, textAlign: 'center', lineHeight: 22 },
@@ -1153,6 +1253,8 @@ const styles = StyleSheet.create({
   profileStat: {},
   profileStatLabel: { fontSize: 11, color: COLORS.subtext, marginBottom: 2 },
   profileStatValue: { fontSize: 13, fontWeight: '600', color: COLORS.text },
+  profileSunTag: { backgroundColor: COLORS.secondary, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  profileSunTagText: { fontSize: 11, color: COLORS.accent, fontWeight: '500' },
   profileMenuBtn: { padding: 4 },
   profileMenuIcon: { fontSize: 22, color: COLORS.subtext, lineHeight: 28 },
 
