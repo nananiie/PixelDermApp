@@ -15,6 +15,7 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Platform,
+  Dimensions,
 } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
 import * as ImagePicker from 'react-native-image-picker';
@@ -44,6 +45,12 @@ const STORAGE_KEYS = {
   profiles: '@pixelderm_profiles',
   activeProfileId: '@pixelderm_active_profile_id',
 };
+
+// --- RESPONSIVE ---
+const { width: SCREEN_W } = Dimensions.get('window');
+const IS_TABLET = SCREEN_W >= 600;
+// Scale values proportionally on tablets, capped at 1.4x
+const sp = (n: number) => IS_TABLET ? Math.round(Math.min(n * (SCREEN_W / 390), n * 1.4)) : n;
 
 // --- THEME ---
 const COLORS = {
@@ -1248,59 +1255,77 @@ const PixelDermApp = () => {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.primary },
   fullScreen: { flex: 1, backgroundColor: COLORS.primary },
-  innerCanvas: { flex: 1, backgroundColor: COLORS.white, borderRadius: 30, marginHorizontal: 15, marginTop: 15, marginBottom: 5, overflow: 'hidden' },
-  scrollContainer: { flex: 1, paddingHorizontal: 20, paddingTop: 20 },
+  innerCanvas: {
+    flex: 1, backgroundColor: COLORS.white, borderRadius: 30, overflow: 'hidden',
+    marginHorizontal: IS_TABLET ? Math.max(20, (SCREEN_W - 720) / 2) : 15,
+    marginTop: IS_TABLET ? 20 : 15,
+    marginBottom: IS_TABLET ? 8 : 5,
+  },
+  scrollContainer: { flex: 1, paddingHorizontal: sp(20), paddingTop: sp(20) },
 
   // Text
-  dashboardTitle: { fontSize: 26, fontWeight: 'bold', color: COLORS.text, marginBottom: 5 },
-  subtext: { color: COLORS.subtext, fontSize: 14, marginBottom: 20 },
-  centerSubtext: { color: COLORS.subtext, fontSize: 12, textAlign: 'center', marginTop: 10 },
-  textSmall: { color: COLORS.text, fontSize: 14 },
-  sectionHeader: { fontSize: 18, fontWeight: 'bold', color: COLORS.text, marginBottom: 10 },
+  dashboardTitle: { fontSize: sp(26), fontWeight: 'bold', color: COLORS.text, marginBottom: 5 },
+  subtext: { color: COLORS.subtext, fontSize: sp(14), marginBottom: 20 },
+  centerSubtext: { color: COLORS.subtext, fontSize: sp(12), textAlign: 'center', marginTop: 10 },
+  textSmall: { color: COLORS.text, fontSize: sp(14) },
+  sectionHeader: { fontSize: sp(18), fontWeight: 'bold', color: COLORS.text, marginBottom: 10 },
 
   // Cards
-  cardBlock: { backgroundColor: COLORS.card, borderRadius: 20, padding: 20, borderWidth: 1, borderColor: COLORS.border, marginBottom: 20 },
-  outlinedCard: { backgroundColor: COLORS.card, borderRadius: 20, padding: 20, borderWidth: 1, borderColor: COLORS.border, marginBottom: 20 },
-  cardTitle: { fontSize: 16, fontWeight: 'bold', color: COLORS.text, marginBottom: 10 },
-  cardLabel: { color: COLORS.subtext, fontSize: 12, marginBottom: 5 },
-  cardValue: { fontWeight: 'bold', fontSize: 20, color: COLORS.text },
+  cardBlock: { backgroundColor: COLORS.card, borderRadius: 20, padding: sp(20), borderWidth: 1, borderColor: COLORS.border, marginBottom: 20 },
+  outlinedCard: { backgroundColor: COLORS.card, borderRadius: 20, padding: sp(20), borderWidth: 1, borderColor: COLORS.border, marginBottom: 20 },
+  cardTitle: { fontSize: sp(16), fontWeight: 'bold', color: COLORS.text, marginBottom: 10 },
+  cardLabel: { color: COLORS.subtext, fontSize: sp(12), marginBottom: 5 },
+  cardValue: { fontWeight: 'bold', fontSize: sp(20), color: COLORS.text },
 
   // Buttons
-  btnFull: { backgroundColor: COLORS.primary, width: '100%', height: 55, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 10 },
-  btnDanger: { backgroundColor: COLORS.riskHigh, width: '100%', height: 50, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 15 },
-  btnText: { color: COLORS.white, fontSize: 16, fontWeight: '600' },
+  btnFull: { backgroundColor: COLORS.primary, width: '100%', height: sp(55), borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 10 },
+  btnDanger: { backgroundColor: COLORS.riskHigh, width: '100%', height: sp(50), borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginTop: 15 },
+  btnText: { color: COLORS.white, fontSize: sp(16), fontWeight: '600' },
 
-  // Input
-  inputField: { backgroundColor: COLORS.card, height: 50, borderRadius: 10, paddingHorizontal: 15, marginBottom: 15, borderWidth: 1, borderColor: COLORS.border, color: COLORS.text, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  // Input — minHeight + paddingVertical instead of fixed height so text never clips on tablets
+  inputField: {
+    backgroundColor: COLORS.card, minHeight: sp(54), borderRadius: 10,
+    paddingHorizontal: sp(15), paddingVertical: sp(13), marginBottom: sp(15),
+    borderWidth: 1, borderColor: COLORS.border, color: COLORS.text,
+    fontSize: sp(15), flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+  },
 
-  // Dropdown modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'flex-end' },
-  dropdownSheet: { backgroundColor: COLORS.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 36 },
-  dropdownTitle: { fontSize: 17, fontWeight: '700', color: COLORS.text, marginBottom: 16 },
-  dropdownItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 12, borderRadius: 10, marginBottom: 4 },
-  dropdownItemText: { fontSize: 15, color: COLORS.text },
+  // Dropdown modal — bottom sheet on phones, centered card on tablets
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: IS_TABLET ? 'center' : 'flex-end',
+    paddingHorizontal: IS_TABLET ? Math.max(30, (SCREEN_W - 560) / 2) : 0,
+  },
+  dropdownSheet: {
+    backgroundColor: COLORS.white, padding: sp(20), paddingBottom: sp(36),
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    ...(IS_TABLET && { borderRadius: 24 }),
+  },
+  dropdownTitle: { fontSize: sp(17), fontWeight: '700', color: COLORS.text, marginBottom: sp(16) },
+  dropdownItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: sp(14), paddingHorizontal: 12, borderRadius: 10, marginBottom: 4 },
+  dropdownItemText: { fontSize: sp(15), color: COLORS.text },
 
   // Body part chips
   bodyPartScroll: { flexGrow: 0, marginBottom: 4 },
   bodyPartChip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, borderColor: COLORS.border, backgroundColor: COLORS.white },
   bodyPartChipActive: { backgroundColor: COLORS.accent, borderColor: COLORS.accent },
-  bodyPartChipText: { fontSize: 13, color: COLORS.subtext, fontWeight: '500' },
+  bodyPartChipText: { fontSize: sp(13), color: COLORS.subtext, fontWeight: '500' },
   bodyPartChipTextActive: { color: COLORS.white },
   addBodyPartChip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, borderWidth: 1.5, borderColor: COLORS.primary, backgroundColor: COLORS.white },
-  addBodyPartText: { fontSize: 13, color: COLORS.primary, fontWeight: '600' },
+  addBodyPartText: { fontSize: sp(13), color: COLORS.primary, fontWeight: '600' },
 
   // Upload
   uploadModeRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
   modePill: { flex: 1, height: 44, borderRadius: 10, borderWidth: 1.5, borderColor: COLORS.border, justifyContent: 'center', alignItems: 'center', backgroundColor: COLORS.bg },
   modePillActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
-  modePillText: { fontSize: 14, color: COLORS.subtext, fontWeight: '500' },
+  modePillText: { fontSize: sp(14), color: COLORS.subtext, fontWeight: '500' },
   modePillTextActive: { color: COLORS.white, fontWeight: '600' },
   cameraPlaceholder: { width: '100%', height: 200, backgroundColor: '#EFEFEF', borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginVertical: 10, overflow: 'hidden', borderWidth: 2, borderColor: COLORS.border, borderStyle: 'dashed' },
   cameraControls: { position: 'absolute', top: 10, right: 10, gap: 8, zIndex: 10 },
   cameraControlBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center' },
   cameraControlText: { fontSize: 16 },
   clearImageBtn: { backgroundColor: COLORS.border, height: 40, borderRadius: 10, justifyContent: 'center', alignItems: 'center', marginTop: 6 },
-  clearImageBtnText: { color: COLORS.subtext, fontWeight: '500', fontSize: 13 },
+  clearImageBtnText: { color: COLORS.subtext, fontWeight: '500', fontSize: sp(13) },
 
   // Analysis tabs
   customTabBar: { flexDirection: 'row', backgroundColor: '#EFEFEF', borderRadius: 20, padding: 4, marginBottom: 20 },
@@ -1313,7 +1338,7 @@ const styles = StyleSheet.create({
   tabBar: { height: 70, backgroundColor: 'transparent', flexDirection: 'row', paddingBottom: 10 },
   tabItem: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   tabIcon: { width: 24, height: 24, resizeMode: 'contain', marginBottom: 4 },
-  tabText: { fontSize: 10, color: COLORS.text, fontWeight: '500' },
+  tabText: { fontSize: sp(10), color: COLORS.text, fontWeight: '500' },
 
   // Processing
   processingCard: { backgroundColor: COLORS.card, width: '100%', padding: 40, borderRadius: 20, alignItems: 'center', borderWidth: 1, borderColor: COLORS.border, elevation: 4 },
@@ -1321,9 +1346,9 @@ const styles = StyleSheet.create({
   progressBarFill: { height: '100%', backgroundColor: COLORS.primary, borderRadius: 3 },
 
   // Results
-  bulletText: { color: COLORS.text, fontSize: 13, marginBottom: 4 },
+  bulletText: { color: COLORS.text, fontSize: sp(13), marginBottom: 4 },
   resultRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: COLORS.border },
-  resultText: { color: COLORS.text, fontSize: 14 },
+  resultText: { color: COLORS.text, fontSize: sp(14) },
   recommendationBubble: { backgroundColor: COLORS.white, padding: 15, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: COLORS.border },
   warningBox: { backgroundColor: '#FFEBEB', padding: 15, borderRadius: 12, borderWidth: 1, borderColor: COLORS.riskHigh, marginTop: 5 },
   warningText: { color: COLORS.riskHigh, fontSize: 13, fontWeight: '500', textAlign: 'center' },
@@ -1333,24 +1358,24 @@ const styles = StyleSheet.create({
   logoArea: { flex: 2, justifyContent: 'center', alignItems: 'center' },
   appLogo: { width: 200, height: 200 },
   bottomHero: { flex: 1, padding: 40, alignItems: 'center' },
-  welcomeTitle: { fontSize: 24, fontWeight: 'bold', marginBottom: 30, color: COLORS.text },
+  welcomeTitle: { fontSize: sp(24), fontWeight: 'bold', marginBottom: 30, color: COLORS.text },
 
   // Home
   scoreCard: { backgroundColor: COLORS.card, borderRadius: 20, padding: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: COLORS.border, marginBottom: 20 },
   scoreCircle: { width: 72, height: 72, borderRadius: 36, borderWidth: 3, borderColor: COLORS.primary, justifyContent: 'center', alignItems: 'center', padding: 6 },
-  scoreNum: { fontSize: 20, fontWeight: 'bold' },
-  scoreTotal: { fontSize: 10, color: COLORS.subtext },
-  scoreLabel: { fontSize: 8, color: COLORS.subtext },
+  scoreNum: { fontSize: sp(20), fontWeight: 'bold' },
+  scoreTotal: { fontSize: sp(10), color: COLORS.subtext },
+  scoreLabel: { fontSize: sp(8), color: COLORS.subtext },
   tipRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: COLORS.border },
-  tipBullet: { color: COLORS.primary, fontSize: 18, marginRight: 12 },
-  tipText: { color: COLORS.text, flex: 1 },
+  tipBullet: { color: COLORS.primary, fontSize: sp(18), marginRight: 12 },
+  tipText: { color: COLORS.text, flex: 1, fontSize: sp(14) },
   disclaimerText: { color: COLORS.subtext, fontSize: 11, textAlign: 'center', marginBottom: 16, fontStyle: 'italic' },
   pinDot: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: COLORS.border, backgroundColor: COLORS.bg },
   pinDotFilled: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
   pinErrorText: { color: COLORS.riskHigh, fontSize: 13, textAlign: 'center', marginBottom: 8 },
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingTop: 60 },
-  emptyStateTitle: { fontSize: 20, fontWeight: 'bold', color: COLORS.text, marginBottom: 12 },
-  emptyStateText: { fontSize: 14, color: COLORS.subtext, textAlign: 'center', lineHeight: 22 },
+  emptyStateTitle: { fontSize: sp(20), fontWeight: 'bold', color: COLORS.text, marginBottom: 12 },
+  emptyStateText: { fontSize: sp(14), color: COLORS.subtext, textAlign: 'center', lineHeight: sp(22) },
 
   // Profile screen
   profileHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 5 },
@@ -1361,28 +1386,28 @@ const styles = StyleSheet.create({
   profileCardRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   profileIconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: COLORS.secondary, justifyContent: 'center', alignItems: 'center' },
   profileIconText: { fontSize: 20 },
-  profileName: { fontSize: 16, fontWeight: 'bold', color: COLORS.text, marginBottom: 6 },
+  profileName: { fontSize: sp(16), fontWeight: 'bold', color: COLORS.text, marginBottom: 6 },
   profileStats: { flexDirection: 'row', gap: 20 },
   profileStat: {},
-  profileStatLabel: { fontSize: 11, color: COLORS.subtext, marginBottom: 2 },
-  profileStatValue: { fontSize: 13, fontWeight: '600', color: COLORS.text },
+  profileStatLabel: { fontSize: sp(11), color: COLORS.subtext, marginBottom: 2 },
+  profileStatValue: { fontSize: sp(13), fontWeight: '600', color: COLORS.text },
   profileSunTag: { backgroundColor: COLORS.secondary, borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
-  profileSunTagText: { fontSize: 11, color: COLORS.accent, fontWeight: '500' },
+  profileSunTagText: { fontSize: sp(11), color: COLORS.accent, fontWeight: '500' },
   profileMenuBtn: { padding: 4 },
   profileMenuIcon: { fontSize: 22, color: COLORS.subtext, lineHeight: 28 },
 
   // History
   historyBtn: { borderWidth: 1.5, borderColor: COLORS.primary, borderRadius: 12, height: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
-  historyBtnText: { color: COLORS.primary, fontWeight: '600', fontSize: 14 },
+  historyBtnText: { color: COLORS.primary, fontWeight: '600', fontSize: sp(14) },
   areaTag: { borderWidth: 1, borderColor: COLORS.border, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 6, marginTop: 6 },
-  areaTagText: { color: COLORS.text, fontSize: 14, fontWeight: '500' },
+  areaTagText: { color: COLORS.text, fontSize: sp(14), fontWeight: '500' },
   historyCard: { backgroundColor: COLORS.card, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: COLORS.border, marginBottom: 12 },
   historyCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  historyCardDate: { fontSize: 16, fontWeight: 'bold', color: COLORS.text },
+  historyCardDate: { fontSize: sp(16), fontWeight: 'bold', color: COLORS.text },
   historyCardMetrics: { flexDirection: 'row', justifyContent: 'space-between' },
   historyMetric: { alignItems: 'center' },
-  historyMetricLabel: { fontSize: 11, color: COLORS.subtext, marginBottom: 4 },
-  historyMetricValue: { fontSize: 14, fontWeight: 'bold', color: COLORS.text },
+  historyMetricLabel: { fontSize: sp(11), color: COLORS.subtext, marginBottom: 4 },
+  historyMetricValue: { fontSize: sp(14), fontWeight: 'bold', color: COLORS.text },
 });
 
 export default PixelDermApp;
