@@ -28,23 +28,23 @@ async function storageSet(key: string, value: string): Promise<void> {
 // User
 // ---------------------------------------------------------------------------
 
-export async function createNewUser(displayName?: string): Promise<string> {
+export async function createNewUser(displayName?: string, pin?: string): Promise<string> {
   const deviceId = `device-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const res = await fetchWithTimeout(`${BASE_URL}/api/users`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ deviceIdentifier: deviceId, deviceType: 'android', name: displayName }),
+    body: JSON.stringify({ deviceIdentifier: deviceId, deviceType: 'android', name: displayName, pin }),
   });
   if (!res.ok) throw new Error('Failed to create user');
   const data = await res.json();
   return data.userId ?? data.user_id ?? data.id;
 }
 
-export async function updateUserName(userId: string, name: string): Promise<void> {
+export async function updateUserName(userId: string, name: string, pin?: string): Promise<void> {
   const res = await fetchWithTimeout(`${BASE_URL}/api/users/${userId}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, ...(pin !== undefined && { pin }) }),
   });
   if (!res.ok) throw new Error('Failed to update user name');
 }

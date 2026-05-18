@@ -28,6 +28,7 @@ type Profile = {
   age: string;
   sex: string;
   skinType: string;
+  pin: string;
   sunExposure: string;
   sunscreenUse: string;
   outdoorFrequency: string;
@@ -164,10 +165,18 @@ const PixelDermApp = () => {
   const [formAge, setFormAge] = useState('');
   const [formSex, setFormSex] = useState('');
   const [formSkinType, setFormSkinType] = useState('');
+  const [formPin, setFormPin] = useState('');
   const [formSunExposure, setFormSunExposure] = useState('');
   const [formSunscreenUse, setFormSunscreenUse] = useState('');
   const [formOutdoorFrequency, setFormOutdoorFrequency] = useState('');
   const [formLastSunburn, setFormLastSunburn] = useState('');
+
+  // PIN entry
+  const [showPinModal, setShowPinModal] = useState(false);
+  const [pendingProfileId, setPendingProfileId] = useState<string | null>(null);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState('');
+  const pinInputRef = useRef<any>(null);
 
   // Camera
   const { hasPermission, requestPermission } = useCameraPermission();
@@ -208,12 +217,9 @@ const PixelDermApp = () => {
         if (profilesStr) {
           const saved = JSON.parse(profilesStr) as Profile[];
           setProfiles(saved);
-          if (activeIdStr && saved.find(p => p.id === activeIdStr)) {
-            setActiveProfileId(activeIdStr);
-            setCurrentScreen('home');
-          } else if (saved.length > 0) {
-            setActiveProfileId(saved[0].id);
-            setCurrentScreen('home');
+          if (saved.length > 0) {
+            // Don't auto-activate — require PIN entry via profile list
+            setCurrentScreen('profile');
           }
         }
       } catch (e) {
@@ -249,7 +255,7 @@ const PixelDermApp = () => {
     try {
       let uid = activeProfile?.userId ?? null;
       if (!uid) {
-        uid = await createNewUser(activeProfile?.name);
+        uid = await createNewUser(activeProfile?.name, activeProfile?.pin);
         updateActiveProfile({ userId: uid });
       }
       const result = await analyzeImage(imageUri, uid, activeProfile?.activePart ?? 'Face', {
@@ -337,7 +343,7 @@ const PixelDermApp = () => {
 
   const handleAddProfile = () => {
     setEditingProfile(null);
-    setFormName(''); setFormAge(''); setFormSex(''); setFormSkinType('');
+    setFormName(''); setFormAge(''); setFormSex(''); setFormSkinType(''); setFormPin('');
     setFormSunExposure(''); setFormSunscreenUse(''); setFormOutdoorFrequency(''); setFormLastSunburn('');
     setShowProfileModal(true);
   };
@@ -346,6 +352,7 @@ const PixelDermApp = () => {
     setEditingProfile(profile);
     setFormName(profile.name); setFormAge(profile.age);
     setFormSex(profile.sex); setFormSkinType(profile.skinType);
+    setFormPin(profile.pin ?? '');
     setFormSunExposure(profile.sunExposure ?? '');
     setFormSunscreenUse(profile.sunscreenUse ?? '');
     setFormOutdoorFrequency(profile.outdoorFrequency ?? '');
@@ -375,32 +382,81 @@ const PixelDermApp = () => {
   const handleProfileMenu = (profile: Profile) => {
     const isActive = profile.id === activeProfileId;
     Alert.alert(profile.name, undefined, [
-      ...(!isActive ? [{ text: 'Switch to this profile', onPress: () => { setActiveProfileId(profile.id); setCurrentScreen('home'); } }] : []),
+      ...(!isActive ? [{ text: 'Switch to this profile', onPress: () => requestProfileSwitch(profile.id) }] : []),
       { text: 'Edit', onPress: () => handleEditProfile(profile) },
       { text: 'Delete', style: 'destructive' as const, onPress: () => handleDeleteProfile(profile.id) },
       { text: 'Cancel', style: 'cancel' as const },
     ]);
   };
 
+  const requestProfileSwitch = (profileId: string) => {
+    if (profileId === activeProfileId) { setCurrentScreen('home'); return; }
+    setPendingProfileId(profileId);
+    setPinInput('');
+    setPinError('');
+    setShowPinModal(true);
+  };
+
+  const handlePinConfirm = (entered: string) => {
+    const target = profiles.find(p => p.id === pendingProfileId);
+    if (!target) return;
+    if (entered !== target.pin) {
+      setPinError('Incorrect PIN. Please try again.');
+      setPinInput('');
+      return;
+    }
+    setActiveProfileId(pendingProfileId!);
+    setCurrentScreen('home');
+    setShowPinModal(false);
+    setPendingProfileId(null);
+    setPinInput('');
+    setPinError('');
+  };
+
   const handleSaveProfile = () => {
-    if (!formName.trim()) { Alert.alert('Error', 'Please enter a name.'); return; }
+    const trimmedName = formName.trim();
+
+    if (!trimmedName) {
+      Alert.alert('Error', 'Please enter a name.'); return;
+    }
+    if (!/^[a-zA-Z\s]+$/.test(trimmedName)) {
+      Alert.alert('Error', 'Name must contain letters only. Numbers and special characters are not allowed.'); return;
+    }
+    if (trimmedName.trim().length < 2) {
+      Alert.alert('Error', 'Name must be at least 2 characters.'); return;
+    }
+    if (!/^\d{4}$/.test(formPin)) {
+      Alert.alert('Error', 'PIN must be exactly 4 digits (numbers only).'); return;
+    }
+
+    const otherProfiles = editingProfile
+      ? profiles.filter(p => p.id !== editingProfile.id)
+      : profiles;
+
+    if (otherProfiles.some(p => p.name.trim().toLowerCase() === trimmedName.toLowerCase())) {
+      Alert.alert('Error', 'A profile with this name already exists. Please choose a different name.'); return;
+    }
+    if (otherProfiles.some(p => p.pin === formPin)) {
+      Alert.alert('Error', 'This PIN is already used by another profile. Please choose a different PIN.'); return;
+    }
+
     if (editingProfile) {
       setProfiles(prev => prev.map(p =>
         p.id === editingProfile.id
-          ? { ...p, name: formName.trim(), age: formAge, sex: formSex, skinType: formSkinType,
-              sunExposure: formSunExposure, sunscreenUse: formSunscreenUse,
+          ? { ...p, name: trimmedName, age: formAge, sex: formSex, skinType: formSkinType,
+              pin: formPin, sunExposure: formSunExposure, sunscreenUse: formSunscreenUse,
               outdoorFrequency: formOutdoorFrequency, lastSunburn: formLastSunburn }
           : p
       ));
       if (editingProfile.userId) {
-        updateUserName(editingProfile.userId, formName.trim()).catch(() => {});
+        updateUserName(editingProfile.userId, trimmedName, formPin).catch(() => {});
       }
     } else {
       const isFirst = profiles.length === 0;
       const newProfile: Profile = {
         id: `profile-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        name: formName.trim(), age: formAge, sex: formSex, skinType: formSkinType,
-        sunExposure: formSunExposure, sunscreenUse: formSunscreenUse,
+        name: trimmedName, age: formAge, sex: formSex, skinType: formSkinType,
+        pin: formPin, sunExposure: formSunExposure, sunscreenUse: formSunscreenUse,
         outdoorFrequency: formOutdoorFrequency, lastSunburn: formLastSunburn,
         userId: null, monitoredParts: ['Face'], activePart: 'Face', lastAnalysis: null, scanHistory: {},
       };
@@ -571,7 +627,7 @@ const PixelDermApp = () => {
             <TouchableOpacity
               key={profile.id}
               style={[styles.profileCard, activeProfile?.id === profile.id && styles.profileCardActive]}
-              onPress={() => { setActiveProfileId(profile.id); setCurrentScreen('home'); }}
+              onPress={() => requestProfileSwitch(profile.id)}
               activeOpacity={0.8}
             >
               <View style={styles.profileCardRow}>
@@ -642,7 +698,7 @@ const PixelDermApp = () => {
           <View style={{ height: 40 }} />
         </ScrollView>
       </View>
-      <TabBar />
+      {activeProfileId && <TabBar />}
     </View>
   );
 
@@ -1092,6 +1148,50 @@ const PixelDermApp = () => {
         </View>
       </Modal>
 
+      {/* PIN Entry Modal */}
+      <Modal visible={showPinModal} transparent animationType="fade">
+        <View style={[styles.modalOverlay, { justifyContent: 'center', paddingHorizontal: 30 }]}>
+          <View style={[styles.dropdownSheet, { borderRadius: 24 }]}>
+            <Text style={styles.dropdownTitle}>Enter PIN</Text>
+            {pendingProfileId && (
+              <Text style={[styles.subtext, { textAlign: 'center', marginBottom: 4, marginTop: -8 }]}>
+                {profiles.find(p => p.id === pendingProfileId)?.name ?? ''}
+              </Text>
+            )}
+            <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 16, marginVertical: 24 }}>
+              {[0, 1, 2, 3].map(i => (
+                <View key={i} style={[styles.pinDot, pinInput.length > i && styles.pinDotFilled]} />
+              ))}
+            </View>
+            <TextInput
+              ref={pinInputRef}
+              value={pinInput}
+              onChangeText={v => {
+                if (!/^\d*$/.test(v) || v.length > 4) return;
+                setPinInput(v);
+                setPinError('');
+                if (v.length === 4) setTimeout(() => handlePinConfirm(v), 150);
+              }}
+              keyboardType="number-pad"
+              maxLength={4}
+              secureTextEntry
+              autoFocus
+              caretHidden
+              style={[styles.inputField, { textAlign: 'center', fontSize: 22, letterSpacing: 14, color: COLORS.text }]}
+              placeholder="• • • •"
+              placeholderTextColor={COLORS.border}
+            />
+            {!!pinError && <Text style={styles.pinErrorText}>{pinError}</Text>}
+            <TouchableOpacity
+              style={[styles.clearImageBtn, { marginTop: 12 }]}
+              onPress={() => { setShowPinModal(false); setPendingProfileId(null); setPinInput(''); setPinError(''); }}
+            >
+              <Text style={styles.clearImageBtnText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {/* Profile Add/Edit Modal — global, renders over any screen */}
       <Modal visible={showProfileModal} transparent animationType="slide">
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
@@ -1114,6 +1214,16 @@ const PixelDermApp = () => {
                   value={formAge}
                   onChangeText={t => setFormAge(t.replace(/[^0-9]/g, ''))}
                   maxLength={3}
+                />
+                <TextInput
+                  style={styles.inputField}
+                  placeholder="4-Digit PIN"
+                  placeholderTextColor="#AAAAAA"
+                  keyboardType="number-pad"
+                  secureTextEntry
+                  value={formPin}
+                  onChangeText={t => { if (/^\d{0,4}$/.test(t)) setFormPin(t); }}
+                  maxLength={4}
                 />
                 <DropdownField placeholder="Sex" value={formSex} options={['Male', 'Female', 'Rather not say']} onSelect={setFormSex} />
                 <DropdownField placeholder="Skin Type" value={formSkinType} options={['Dry', 'Oily', 'Normal', 'Sensitive']} onSelect={setFormSkinType} />
@@ -1235,6 +1345,9 @@ const styles = StyleSheet.create({
   tipBullet: { color: COLORS.primary, fontSize: 18, marginRight: 12 },
   tipText: { color: COLORS.text, flex: 1 },
   disclaimerText: { color: COLORS.subtext, fontSize: 11, textAlign: 'center', marginBottom: 16, fontStyle: 'italic' },
+  pinDot: { width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: COLORS.border, backgroundColor: COLORS.bg },
+  pinDotFilled: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  pinErrorText: { color: COLORS.riskHigh, fontSize: 13, textAlign: 'center', marginBottom: 8 },
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingTop: 60 },
   emptyStateTitle: { fontSize: 20, fontWeight: 'bold', color: COLORS.text, marginBottom: 12 },
   emptyStateText: { fontSize: 14, color: COLORS.subtext, textAlign: 'center', lineHeight: 22 },
