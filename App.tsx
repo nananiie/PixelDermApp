@@ -15,7 +15,7 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Platform,
-  Dimensions,
+  useWindowDimensions,
 } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
 import * as ImagePicker from 'react-native-image-picker';
@@ -47,10 +47,8 @@ const STORAGE_KEYS = {
 };
 
 // --- RESPONSIVE ---
-const { width: SCREEN_W } = Dimensions.get('window');
-const IS_TABLET = SCREEN_W >= 600;
-// Scale values proportionally on tablets, capped at 1.4x
-const sp = (n: number) => IS_TABLET ? Math.round(Math.min(n * (SCREEN_W / 390), n * 1.4)) : n;
+// Content is always phone-width (phoneFrame centers it on tablets), so no scaling needed.
+const sp = (n: number) => n;
 
 // --- THEME ---
 const COLORS = {
@@ -148,6 +146,10 @@ const skinScoreRisk = (score: number) =>
     : { label: 'High', color: COLORS.riskHigh };
 
 const PixelDermApp = () => {
+  // --- RESPONSIVE ---
+  const { width: winW } = useWindowDimensions();
+  const isTablet = winW >= 600;
+
   // --- STATE ---
   const [currentScreen, setCurrentScreen] = useState('landing');
   const [analysisTab, setAnalysisTab] = useState('results');
@@ -534,7 +536,7 @@ const PixelDermApp = () => {
                   <Text style={[styles.cardTitle, { marginBottom: 2 }]}>{activePart}</Text>
                   <Text style={styles.textSmall}>Last scanned: {new Date(lastAnalysis.analysis.timestamp).toLocaleDateString()}</Text>
                   <Text style={[styles.textSmall, { color: COLORS.accent, marginTop: 4 }]}>
-                    Next scan recommended: {new Date(new Date(lastAnalysis.analysis.timestamp).getTime() + 7 * 24 * 60 * 60 * 1000).toLocaleDateString()}
+                    Next scan recommended: {new Date(new Date(lastAnalysis.analysis.timestamp).getTime() + 14 * 24 * 60 * 60 * 1000).toLocaleDateString()}
                   </Text>
                 </View>
                 <View style={styles.scoreCard}>
@@ -1119,6 +1121,8 @@ const PixelDermApp = () => {
         barStyle={currentScreen === 'landing' ? 'dark-content' : 'light-content'}
         backgroundColor={currentScreen === 'landing' ? COLORS.white : COLORS.primary}
       />
+      {/* Phone-frame wrapper: constrains content to 430 px and centers it on tablets */}
+      <View style={isTablet ? styles.phoneFrame : styles.fill}>
       {currentScreen === 'landing' && renderLanding()}
       {currentScreen === 'home' && renderHome()}
       {currentScreen === 'profile' && renderProfile()}
@@ -1247,6 +1251,7 @@ const PixelDermApp = () => {
           </TouchableOpacity>
         </KeyboardAvoidingView>
       </Modal>
+      </View>
     </SafeAreaView>
   );
 };
@@ -1257,9 +1262,7 @@ const styles = StyleSheet.create({
   fullScreen: { flex: 1, backgroundColor: COLORS.primary },
   innerCanvas: {
     flex: 1, backgroundColor: COLORS.white, borderRadius: 30, overflow: 'hidden',
-    marginHorizontal: IS_TABLET ? Math.max(20, (SCREEN_W - 720) / 2) : 15,
-    marginTop: IS_TABLET ? 20 : 15,
-    marginBottom: IS_TABLET ? 8 : 5,
+    marginHorizontal: 15, marginTop: 15, marginBottom: 5,
   },
   scrollContainer: { flex: 1, paddingHorizontal: sp(20), paddingTop: sp(20) },
 
@@ -1293,13 +1296,11 @@ const styles = StyleSheet.create({
   // Dropdown modal — bottom sheet on phones, centered card on tablets
   modalOverlay: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.35)',
-    justifyContent: IS_TABLET ? 'center' : 'flex-end',
-    paddingHorizontal: IS_TABLET ? Math.max(30, (SCREEN_W - 560) / 2) : 0,
+    justifyContent: 'flex-end',
   },
   dropdownSheet: {
     backgroundColor: COLORS.white, padding: sp(20), paddingBottom: sp(36),
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    ...(IS_TABLET && { borderRadius: 24 }),
   },
   dropdownTitle: { fontSize: sp(17), fontWeight: '700', color: COLORS.text, marginBottom: sp(16) },
   dropdownItem: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: sp(14), paddingHorizontal: 12, borderRadius: 10, marginBottom: 4 },
@@ -1395,6 +1396,10 @@ const styles = StyleSheet.create({
   profileSunTagText: { fontSize: sp(11), color: COLORS.accent, fontWeight: '500' },
   profileMenuBtn: { padding: 4 },
   profileMenuIcon: { fontSize: 22, color: COLORS.subtext, lineHeight: 28 },
+
+  // Tablet phone-frame
+  phoneFrame: { flex: 1, width: 430, alignSelf: 'center' },
+  fill: { flex: 1 },
 
   // History
   historyBtn: { borderWidth: 1.5, borderColor: COLORS.primary, borderRadius: 12, height: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
