@@ -553,8 +553,9 @@ const PixelDermApp = () => {
         failOnCancel: false,
       });
     } catch (e: any) {
-      if (e.message && !e.message.includes('cancel') && !e.message.includes('Cancel')) {
-        Alert.alert('PDF Error', 'Could not generate the PDF report. Please try again.');
+      const msg = e?.message ?? String(e);
+      if (!msg.toLowerCase().includes('cancel')) {
+        Alert.alert('PDF Error', msg || 'Could not generate the PDF report.');
       }
     }
   };
