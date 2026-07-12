@@ -222,6 +222,8 @@ const PixelDermApp = () => {
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState('');
   const pinInputRef = useRef<any>(null);
+  const processingCancelTimerRef = useRef<any>(null);
+  const [showProcessingCancel, setShowProcessingCancel] = useState(false);
 
   // T&C / Privacy consent
   const [termsAccepted, setTermsAccepted] = useState(false);
@@ -341,6 +343,7 @@ const PixelDermApp = () => {
 
     progressRef.current = 0;
     setProgress(0);
+    setShowProcessingCancel(false);
     setCurrentScreen('processing');
 
     const timer = setInterval(() => {
@@ -348,6 +351,9 @@ const PixelDermApp = () => {
       progressRef.current = next;
       setProgress(Math.round(next));
     }, 120);
+
+    // Show a cancel button after 8 s in case the server is unreachable
+    processingCancelTimerRef.current = setTimeout(() => setShowProcessingCancel(true), 8000);
 
     let hasError = false;
     try {
@@ -370,9 +376,11 @@ const PixelDermApp = () => {
       });
     } catch (e: any) {
       hasError = true;
-      Alert.alert('Analysis Error', e.message);
+      Alert.alert('Analysis Error', e.message ?? 'Could not connect to the server. Please check your internet connection and try again.');
     } finally {
       clearInterval(timer);
+      clearTimeout(processingCancelTimerRef.current);
+      setShowProcessingCancel(false);
       if (hasError) {
         setCurrentScreen('upload');
       } else {
@@ -1019,6 +1027,23 @@ const PixelDermApp = () => {
             <View style={[styles.progressBarFill, { width: `${progress}%` }]} />
           </View>
           <Text style={styles.centerSubtext}>{progress}%</Text>
+          {showProcessingCancel && (
+            <>
+              <Text style={[styles.centerSubtext, { marginTop: 16, color: COLORS.riskModerate }]}>
+                This is taking longer than expected...
+              </Text>
+              <TouchableOpacity
+                style={[styles.clearImageBtn, { marginTop: 10, width: '100%' }]}
+                onPress={() => {
+                  clearTimeout(processingCancelTimerRef.current);
+                  setShowProcessingCancel(false);
+                  setCurrentScreen('upload');
+                }}
+              >
+                <Text style={styles.clearImageBtnText}>Cancel</Text>
+              </TouchableOpacity>
+            </>
+          )}
         </View>
       </View>
       <TabBar />
