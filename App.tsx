@@ -281,14 +281,10 @@ const PixelDermApp = () => {
           }
         }
 
-        // Check for a pending offline scan
+        // Load pending offline scan into state — modal is shown after profile login
         const pending = await loadPendingScan();
         if (pending) {
           setPendingScanData(pending);
-          const isOnline = await checkConnectivity();
-          if (isOnline) {
-            setTimeout(() => setShowPendingScanModal(true), 800);
-          }
         }
       } catch (e) {
         console.error('Failed to restore session:', e);
@@ -400,6 +396,20 @@ const PixelDermApp = () => {
     const scan = pendingScanData;
     await clearPendingScan();
     setPendingScanData(null);
+
+    // Verify the image file still exists before attempting analysis
+    try {
+      const response = await fetch(scan.imageUri);
+      if (!response.ok && response.status !== 0) throw new Error('gone');
+    } catch {
+      Alert.alert(
+        'Image No Longer Available',
+        'The saved photo was removed from temporary storage when the app was closed. Please take a new photo.',
+        [{ text: 'Take New Photo', onPress: () => setCurrentScreen('upload') }]
+      );
+      return;
+    }
+
     await handleAnalyzeWithData(scan.imageUri, scan.bodyArea);
   };
 
@@ -607,6 +617,13 @@ const PixelDermApp = () => {
     setPendingProfileId(null);
     setPinInput('');
     setPinError('');
+
+    // If there's a pending offline scan for this profile, offer to resume it
+    if (pendingScanData && pendingScanData.profileId === pendingProfileId) {
+      checkConnectivity().then(isOnline => {
+        if (isOnline) setTimeout(() => setShowPendingScanModal(true), 600);
+      });
+    }
   };
 
   const handleSaveProfile = () => {
