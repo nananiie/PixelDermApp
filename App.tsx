@@ -16,11 +16,16 @@ import {
   KeyboardAvoidingView,
   Platform,
   useWindowDimensions,
+  Share,
 } from 'react-native';
 import { Camera, useCameraDevice, useCameraPermission, usePhotoOutput } from 'react-native-vision-camera';
 import * as ImagePicker from 'react-native-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createNewUser, analyzeImage, updateUserName, BASE_URL, type AnalyzeResult } from './src/api';
+import {
+  createNewUser, analyzeImage, updateUserName, BASE_URL,
+  checkConnectivity, savePendingScan, loadPendingScan, clearPendingScan,
+  type AnalyzeResult, type PendingScan,
+} from './src/api';
 
 // --- TYPES ---
 type Profile = {
@@ -44,7 +49,38 @@ type Profile = {
 const STORAGE_KEYS = {
   profiles: '@pixelderm_profiles',
   activeProfileId: '@pixelderm_active_profile_id',
+  termsAccepted: '@pixelderm_terms_accepted',
 };
+
+const TC_TEXT = `Terms & Conditions and Privacy Policy
+
+Last Updated: July 2026
+
+By using PixelDerm, you agree to the following terms.
+
+1. DATA COLLECTION
+PixelDerm collects: skin images you capture, analysis results (spot count, texture, pigmentation), profile information (name, age, sex, skin type), and lifestyle data (sun exposure, sunscreen use, outdoor frequency).
+
+2. HOW WE USE YOUR DATA
+Your data is used to:
+• Generate personalized skin health analysis and longitudinal trend monitoring
+• Provide AI-powered recommendations tailored to your individual skin profile
+• Compare current scans against your baseline for progress tracking
+
+3. DATA STORAGE & SECURITY
+Images and analysis data are stored on secured servers. Your profile information is also stored locally on your device.
+
+4. DATA SHARING
+We do not sell or share your personal data with third parties. Data is used solely to deliver and improve the PixelDerm service.
+
+5. MEDICAL DISCLAIMER
+PixelDerm is not a medical device and does not provide medical diagnoses or treatment advice. All recommendations are for informational and educational purposes only. Always consult a qualified dermatologist for medical evaluation and treatment.
+
+6. DATA RETENTION
+Your data is retained for as long as you use the app. You may delete all data at any time from the Settings screen.
+
+7. YOUR CONSENT
+By checking the box and tapping "Get Started", you explicitly consent to the collection and use of your data as described above for the purpose of providing personalized skin health recommendations.`;
 
 // --- RESPONSIVE ---
 // Content is always phone-width (phoneFrame centers it on tablets), so no scaling needed.
@@ -187,6 +223,14 @@ const PixelDermApp = () => {
   const [pinError, setPinError] = useState('');
   const pinInputRef = useRef<any>(null);
 
+  // T&C / Privacy consent
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [showTermsModal, setShowTermsModal] = useState(false);
+
+  // Offline / Pending scan
+  const [pendingScanData, setPendingScanData] = useState<PendingScan | null>(null);
+  const [showPendingScanModal, setShowPendingScanModal] = useState(false);
+
   // Camera
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice(cameraPosition);
@@ -219,10 +263,13 @@ const PixelDermApp = () => {
   useEffect(() => {
     const restore = async () => {
       try {
-        const [profilesStr, activeIdStr] = await Promise.all([
+        const [profilesStr, termsStr] = await Promise.all([
           AsyncStorage.getItem(STORAGE_KEYS.profiles),
-          AsyncStorage.getItem(STORAGE_KEYS.activeProfileId),
+          AsyncStorage.getItem(STORAGE_KEYS.termsAccepted),
         ]);
+
+        if (termsStr === 'true') setTermsAccepted(true);
+
         if (profilesStr) {
           const saved = JSON.parse(profilesStr) as Profile[];
           setProfiles(saved);
@@ -231,12 +278,26 @@ const PixelDermApp = () => {
             setCurrentScreen('profile');
           }
         }
+
+        // Check for a pending offline scan
+        const pending = await loadPendingScan();
+        if (pending) {
+          setPendingScanData(pending);
+          const isOnline = await checkConnectivity();
+          if (isOnline) {
+            setTimeout(() => setShowPendingScanModal(true), 800);
+          }
+        }
       } catch (e) {
         console.error('Failed to restore session:', e);
       }
     };
     restore().catch(console.error);
   }, []);
+
+  useEffect(() => {
+    AsyncStorage.setItem(STORAGE_KEYS.termsAccepted, String(termsAccepted)).catch(() => {});
+  }, [termsAccepted]);
 
   useEffect(() => {
     AsyncStorage.setItem(STORAGE_KEYS.profiles, JSON.stringify(profiles)).catch(() => {});
@@ -249,7 +310,35 @@ const PixelDermApp = () => {
   }, [activeProfileId]);
 
   // --- HANDLERS ---
-  const handleAnalyze = async (imageUri: string) => {
+
+  // Core analysis runner — accepts optional bodyArea override (used when resuming offline scan).
+  const handleAnalyzeWithData = async (imageUri: string, bodyAreaOverride?: string) => {
+    // Check connectivity before showing the processing screen.
+    const isOnline = await checkConnectivity();
+    if (!isOnline) {
+      const scan: PendingScan = {
+        imageUri,
+        userId: activeProfile?.userId ?? null,
+        profileId: activeProfileId ?? '',
+        profileName: activeProfile?.name ?? '',
+        bodyArea: bodyAreaOverride ?? activeProfile?.activePart ?? 'Face',
+        sunProfile: {
+          sunExposure: activeProfile?.sunExposure,
+          sunscreenUse: activeProfile?.sunscreenUse,
+          outdoorFrequency: activeProfile?.outdoorFrequency,
+          lastSunburn: activeProfile?.lastSunburn,
+        },
+        savedAt: new Date().toISOString(),
+      };
+      await savePendingScan(scan);
+      setPendingScanData(scan);
+      Alert.alert(
+        'No Internet Detected',
+        "Your scan has been saved and will be analyzed automatically when you're back online.",
+      );
+      return;
+    }
+
     progressRef.current = 0;
     setProgress(0);
     setCurrentScreen('processing');
@@ -267,17 +356,17 @@ const PixelDermApp = () => {
         uid = await createNewUser(activeProfile?.name, activeProfile?.pin);
         updateActiveProfile({ userId: uid });
       }
-      const result = await analyzeImage(imageUri, uid, activeProfile?.activePart ?? 'Face', {
+      const bodyArea = bodyAreaOverride ?? activeProfile?.activePart ?? 'Face';
+      const result = await analyzeImage(imageUri, uid, bodyArea, {
         sunExposure: activeProfile?.sunExposure,
         sunscreenUse: activeProfile?.sunscreenUse,
         outdoorFrequency: activeProfile?.outdoorFrequency,
         lastSunburn: activeProfile?.lastSunburn,
       });
-      const part = activeProfile?.activePart ?? 'Face';
       const prevHistory = activeProfile?.scanHistory ?? {};
       updateActiveProfile({
         lastAnalysis: result,
-        scanHistory: { ...prevHistory, [part]: [result, ...(prevHistory[part] ?? [])] },
+        scanHistory: { ...prevHistory, [bodyArea]: [result, ...(prevHistory[bodyArea] ?? [])] },
       });
     } catch (e: any) {
       hasError = true;
@@ -290,6 +379,96 @@ const PixelDermApp = () => {
         progressRef.current = 100;
         setProgress(100);
         setTimeout(() => setCurrentScreen('analysis'), 400);
+      }
+    }
+  };
+
+  const handleAnalyze = (imageUri: string) => handleAnalyzeWithData(imageUri);
+
+  // Resume a scan that was saved while offline.
+  const handleResumePendingScan = async () => {
+    setShowPendingScanModal(false);
+    if (!pendingScanData) return;
+    const scan = pendingScanData;
+    await clearPendingScan();
+    setPendingScanData(null);
+    await handleAnalyzeWithData(scan.imageUri, scan.bodyArea);
+  };
+
+  const handleDiscardPendingScan = async () => {
+    setShowPendingScanModal(false);
+    await clearPendingScan();
+    setPendingScanData(null);
+    setCurrentScreen('upload');
+  };
+
+  // Share / print the current analysis result.
+  const handleShareAnalysis = async () => {
+    const analysisResult = activeProfile?.lastAnalysis;
+    if (!analysisResult) return;
+    const { features, baseline, recommendation, analysis, geminiRecommendation, uvDamage } = analysisResult;
+    const skinScore = computeSkinScore(features);
+    const riskInfo = skinScoreRisk(skinScore);
+    const activePart = activeProfile?.activePart ?? 'Face';
+    const scanDate = new Date(analysis.timestamp).toLocaleString();
+    const spotDelta = baseline ? features.spotCount - baseline.spotCount : null;
+    const line = '─'.repeat(34);
+
+    const report = [
+      'PIXELDERM SKIN ANALYSIS REPORT',
+      line,
+      '',
+      `Patient      : ${activeProfile?.name ?? '—'}`,
+      `Age / Sex    : ${activeProfile?.age ?? '—'} / ${activeProfile?.sex ?? '—'}`,
+      `Skin Type    : ${activeProfile?.skinType ?? '—'}`,
+      `Area Analyzed: ${activePart}`,
+      `Date         : ${scanDate}`,
+      '',
+      'MEASURED METRICS',
+      line,
+      `Skin Score      : ${skinScore}%`,
+      `Risk Level      : ${riskInfo.label}`,
+      `Spots Detected  : ${features.spotCount}`,
+      `Texture Score   : ${Math.min(features.textureScore * 100, 100).toFixed(1)}%`,
+      `Pigmentation    : ${(features.pigmentation * 100).toFixed(1)}%`,
+      '',
+      ...(baseline ? [
+        'BASELINE COMPARISON',
+        line,
+        `Spots     : ${features.spotCount} (baseline ${baseline.spotCount}, change ${spotDelta! >= 0 ? '+' : ''}${spotDelta})`,
+        `Texture   : ${Math.min(features.textureScore * 100, 100).toFixed(1)}% (baseline ${Math.min(baseline.textureScore * 100, 100).toFixed(1)}%)`,
+        `Pigment   : ${(features.pigmentation * 100).toFixed(1)}% (baseline ${(baseline.pigmentation * 100).toFixed(1)}%)`,
+        `Status    : ${recommendation.status}`,
+        '',
+      ] : []),
+      ...(uvDamage ? [
+        'UV DAMAGE ASSESSMENT',
+        line,
+        `Level  : ${uvDamage.level}`,
+        uvDamage.advice,
+        '',
+      ] : []),
+      'RECOMMENDATION',
+      line,
+      recommendation.advice,
+      '',
+      ...(geminiRecommendation ? [
+        'AI RECOMMENDATION',
+        line,
+        geminiRecommendation,
+        '',
+      ] : []),
+      line,
+      'Generated by PixelDerm',
+      'For informational purposes only — not medical advice.',
+      'Consult a qualified dermatologist for diagnosis and treatment.',
+    ].join('\n');
+
+    try {
+      await Share.share({ title: 'PixelDerm Analysis Report', message: report });
+    } catch (e: any) {
+      if (e.message !== 'The user did not share') {
+        Alert.alert('Share Error', e.message);
       }
     }
   };
@@ -503,7 +682,33 @@ const PixelDermApp = () => {
       </View>
       <View style={styles.bottomHero}>
         <Text style={styles.welcomeTitle}>Welcome to PixelDerm!</Text>
-        <TouchableOpacity style={styles.btnFull} onPress={handleAddProfile}>
+
+        {/* T&C consent checkbox */}
+        <TouchableOpacity
+          style={styles.checkboxRow}
+          onPress={() => setTermsAccepted(v => !v)}
+          activeOpacity={0.7}
+        >
+          <View style={[styles.checkbox, termsAccepted && styles.checkboxChecked]}>
+            {termsAccepted && <Text style={{ color: COLORS.white, fontSize: 12, fontWeight: '700', lineHeight: 16 }}>✓</Text>}
+          </View>
+          <Text style={styles.checkboxLabel}>
+            {'I agree to the '}
+            <Text
+              style={styles.linkText}
+              onPress={() => setShowTermsModal(true)}
+            >
+              Terms and Conditions
+            </Text>
+            {' and consent to data collection for personalized recommendations.'}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.btnFull, !termsAccepted && styles.btnDisabled]}
+          onPress={() => { if (termsAccepted) handleAddProfile(); }}
+          activeOpacity={termsAccepted ? 0.8 : 1}
+        >
           <Text style={styles.btnText}>Get Started</Text>
         </TouchableOpacity>
       </View>
@@ -842,8 +1047,15 @@ const PixelDermApp = () => {
       <View style={styles.fullScreen}>
         <View style={styles.innerCanvas}>
           <ScrollView style={styles.scrollContainer} showsVerticalScrollIndicator={false}>
-            <Text style={styles.dashboardTitle}>Analysis Complete</Text>
-            <Text style={styles.subtext}>{scanDate}</Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.dashboardTitle}>Analysis Complete</Text>
+                <Text style={styles.subtext}>{scanDate}</Text>
+              </View>
+              <TouchableOpacity style={styles.printBtn} onPress={handleShareAnalysis}>
+                <Text style={styles.printBtnText}>Share / Print</Text>
+              </TouchableOpacity>
+            </View>
             <View style={[styles.outlinedCard, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
               <View>
                 <Text style={styles.cardLabel}>Risk Level</Text>
@@ -1132,6 +1344,58 @@ const PixelDermApp = () => {
       {currentScreen === 'history' && renderHistory()}
       {currentScreen === 'settings' && renderSettings()}
 
+      {/* Terms & Conditions Modal */}
+      <Modal visible={showTermsModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.dropdownSheet, { maxHeight: '85%', paddingBottom: 20 }]}>
+            <Text style={styles.dropdownTitle}>Terms & Conditions</Text>
+            <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: '80%' }}>
+              <Text style={[styles.textSmall, { lineHeight: 22, color: COLORS.subtext }]}>{TC_TEXT}</Text>
+            </ScrollView>
+            <TouchableOpacity
+              style={[styles.btnFull, { marginTop: 16 }]}
+              onPress={() => { setTermsAccepted(true); setShowTermsModal(false); }}
+            >
+              <Text style={styles.btnText}>Accept & Close</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.clearImageBtn, { marginTop: 8 }]}
+              onPress={() => setShowTermsModal(false)}
+            >
+              <Text style={styles.clearImageBtnText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Pending Scan Modal — shown when app reopens online with a saved offline scan */}
+      <Modal visible={showPendingScanModal} transparent animationType="fade">
+        <View style={[styles.modalOverlay, { justifyContent: 'center', paddingHorizontal: 30 }]}>
+          <View style={[styles.dropdownSheet, { borderRadius: 24, paddingBottom: 28 }]}>
+            <Text style={styles.dropdownTitle}>Pending Scan Found</Text>
+            {pendingScanData && (
+              <View style={styles.pendingScanInfo}>
+                <Text style={styles.pendingScanDetail}>
+                  Area: <Text style={{ fontWeight: '600', color: COLORS.text }}>{pendingScanData.bodyArea}</Text>
+                </Text>
+                <Text style={styles.pendingScanDetail}>
+                  Saved: <Text style={{ fontWeight: '600', color: COLORS.text }}>{new Date(pendingScanData.savedAt).toLocaleString()}</Text>
+                </Text>
+              </View>
+            )}
+            <Text style={[styles.textSmall, { lineHeight: 22, marginBottom: 20 }]}>
+              You have a stored image that hasn't been analyzed yet. Would you like to continue or take another photo?
+            </Text>
+            <TouchableOpacity style={styles.btnFull} onPress={handleResumePendingScan}>
+              <Text style={styles.btnText}>Continue Analysis</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.clearImageBtn, { marginTop: 8 }]} onPress={handleDiscardPendingScan}>
+              <Text style={styles.clearImageBtnText}>Take Another Photo</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {/* Consistency reminder — shown after camera capture preview */}
       <Modal visible={showConsistencyModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -1400,6 +1664,32 @@ const styles = StyleSheet.create({
   // Tablet phone-frame
   phoneFrame: { flex: 1, width: 430, alignSelf: 'center' },
   fill: { flex: 1 },
+
+  // T&C checkbox
+  checkboxRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 18, paddingHorizontal: 4, gap: 10 },
+  checkbox: {
+    width: 22, height: 22, borderRadius: 5, borderWidth: 2, borderColor: COLORS.primary,
+    justifyContent: 'center', alignItems: 'center', marginTop: 1, flexShrink: 0,
+    backgroundColor: COLORS.white,
+  },
+  checkboxChecked: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  checkboxLabel: { flex: 1, fontSize: sp(13), color: COLORS.subtext, lineHeight: 20 },
+  linkText: { color: COLORS.accent, fontWeight: '600', textDecorationLine: 'underline' },
+  btnDisabled: { opacity: 0.45 },
+
+  // Print / Share button (analysis screen)
+  printBtn: {
+    borderWidth: 1.5, borderColor: COLORS.primary, borderRadius: 20,
+    paddingHorizontal: 14, paddingVertical: 7, marginTop: 4,
+  },
+  printBtnText: { color: COLORS.primary, fontWeight: '600', fontSize: sp(13) },
+
+  // Pending scan info block
+  pendingScanInfo: {
+    backgroundColor: COLORS.secondary + '60', borderRadius: 12, padding: 12,
+    marginBottom: 14, gap: 4,
+  },
+  pendingScanDetail: { fontSize: sp(13), color: COLORS.subtext },
 
   // History
   historyBtn: { borderWidth: 1.5, borderColor: COLORS.primary, borderRadius: 12, height: 44, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },

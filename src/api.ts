@@ -180,3 +180,54 @@ export async function checkHealth(): Promise<boolean> {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Connectivity (short 3-second probe — used before upload to detect offline)
+// ---------------------------------------------------------------------------
+
+export async function checkConnectivity(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(`${BASE_URL}/health`, { signal: controller.signal });
+    clearTimeout(id);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pending scan (offline queue — stores one scan while device is offline)
+// ---------------------------------------------------------------------------
+
+export type PendingScan = {
+  imageUri: string;
+  userId: string | null;
+  profileId: string;
+  bodyArea: string;
+  profileName: string;
+  sunProfile?: SunProfile;
+  savedAt: string;
+};
+
+const PENDING_SCAN_KEY = '@pixelderm_pending_scan';
+
+export async function savePendingScan(scan: PendingScan): Promise<void> {
+  await AsyncStorage.setItem(PENDING_SCAN_KEY, JSON.stringify(scan));
+}
+
+export async function loadPendingScan(): Promise<PendingScan | null> {
+  try {
+    const data = await AsyncStorage.getItem(PENDING_SCAN_KEY);
+    return data ? (JSON.parse(data) as PendingScan) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearPendingScan(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(PENDING_SCAN_KEY);
+  } catch { /* ignore */ }
+}
